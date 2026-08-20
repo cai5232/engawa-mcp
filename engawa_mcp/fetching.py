@@ -34,6 +34,36 @@ MAX_LINKS = 20
 PAGE_MAX_BYTES = 20 * 1024 * 1024        # per-response cap, streamed in
 AGGREGATE_MAX_BYTES = 64 * 1024 * 1024   # per-render cap across all requests
 
+# Production Chromium hardening — module-level so tests pin the real launch
+# configuration instead of a copy that could drift.
+CHROMIUM_ARGS = [
+    # WebRTC can emit STUN over UDP without ever hitting the route layer — a
+    # direct network path around the guard. With no proxy configured, this
+    # policy silences it (probe-verified: ICE gathering yields zero candidates).
+    "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+    # QUIC would let WebTransport talk UDP around the guard.
+    "--disable-quic",
+    # The renderer needs no DNS at all — every fetch is fulfilled from our
+    # side. Mapping every name to NXDOMAIN kills speculative networking
+    # (DNS prefetch, preconnect) and anything else that might slip past the
+    # route layer by name. Routed+fulfilled requests never resolve, so this
+    # costs nothing.
+    "--host-resolver-rules=MAP * ~NOTFOUND",
+]
+
+# Belt to the flags' braces: remove the WebRTC/WebTransport entry points from
+# every document in the context. The IP-handling policy already blocks the
+# UDP path; this also closes TURN-over-TCP by leaving no API to reach it.
+WEBRTC_KILL_SCRIPT = """
+for (const k of ["RTCPeerConnection", "webkitRTCPeerConnection",
+                 "RTCIceGatherer", "WebTransport"]) {
+  try {
+    Object.defineProperty(window, k,
+      {value: undefined, configurable: false, writable: false});
+  } catch (e) {}
+}
+"""
+
 # Test seam: injected into guarded_get so the static lane's redirect handling
 # is testable with httpx.MockTransport. None in production.
 _TRANSPORT_FOR_TESTS = None
@@ -85,24 +115,33 @@ async def _fetch_dynamic(url: str) -> tuple[str, str]:
                     "browser lane: pip install 'engawa-mcp[browser]' && "
                     "playwright install chromium")
 
-    consumed = 0  # aggregate page budget — one hostile SPA can't stream forever
+    # Aggregate page budget. Admission is a reservation taken *before* any
+    # await (handlers share one event loop, so check-and-reserve is atomic):
+    # concurrent handlers cannot all pass a stale check and then each buffer
+    # a full-size response. Unused reservation is refunded after the fetch.
+    budget = {"left": AGGREGATE_MAX_BYTES}
 
     async def _guard_route(route):
-        nonlocal consumed
+        reserved = 0
         try:
-            if route.request.method != "GET" or consumed >= AGGREGATE_MAX_BYTES:
+            if route.request.method != "GET" or budget["left"] <= 0:
                 await route.abort()
                 return
+            reserved = min(PAGE_MAX_BYTES, budget["left"])
+            budget["left"] -= reserved
             fwd = {k: v for k, v in (route.request.headers or {}).items()
                    if k.lower() not in ("host", "content-length", "cookie")}
             resp, err = await net.guarded_get(route.request.url, timeout=20.0,
                                               headers=fwd,
-                                              max_bytes=PAGE_MAX_BYTES,
+                                              max_bytes=reserved,
                                               transport=_TRANSPORT_FOR_TESTS)
             if resp is None:
+                budget["left"] += reserved  # full refund — nothing was kept
+                reserved = 0
                 await route.abort()
                 return
-            consumed += len(resp.content)
+            budget["left"] += reserved - len(resp.content)  # refund the unused part
+            reserved = 0
             # set-cookie dropped: fulfill() takes a flat dict, so repeated
             # Set-Cookie fields would merge into one invalid value — and the
             # ephemeral context has no business keeping cookies anyway.
@@ -111,6 +150,7 @@ async def _fetch_dynamic(url: str) -> tuple[str, str]:
                                          if k.lower() != "set-cookie"},
                                 body=resp.content)
         except Exception:  # noqa: BLE001 — guard failure = don't fetch
+            budget["left"] += reserved
             try:
                 await route.abort()
             except Exception:  # noqa: BLE001
@@ -123,24 +163,14 @@ async def _fetch_dynamic(url: str) -> tuple[str, str]:
 
     try:
         async with async_playwright() as p:
-            browser = await p.chromium.launch(
-                headless=True,
-                args=[
-                    # WebRTC can emit STUN over UDP without ever hitting the
-                    # route layer — a direct network path around the guard.
-                    # With no proxy configured, this policy silences it
-                    # (verified: ICE gathering yields zero candidates).
-                    "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
-                    # QUIC would let WebTransport talk UDP around the guard.
-                    "--disable-quic",
-                ],
-            )
+            browser = await p.chromium.launch(headless=True, args=CHROMIUM_ARGS)
             try:
                 ctx = await browser.new_context(
                     user_agent=BROWSER_HEADERS["User-Agent"],
                     viewport={"width": 1280, "height": 900},
                     service_workers="block",
                 )
+                await ctx.add_init_script(WEBRTC_KILL_SCRIPT)
                 await ctx.route("**/*", _guard_route)
                 await ctx.route_web_socket("**/*", _ws_block)
                 page = await ctx.new_page()

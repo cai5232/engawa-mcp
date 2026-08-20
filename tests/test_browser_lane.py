@@ -16,18 +16,14 @@ playwright = pytest.importorskip("playwright.async_api")
 PAGE = b"""<!doctype html><html><head><title>Fixture</title></head><body>
 <article><p id="body-text">porch fixture body text, long enough to matter.</p></article>
 <script src="/app.js"></script>
+<div id="rtc"></div>
 <script>
   try {
     const ws = new WebSocket("ws://HOSTPORT/ws");
     ws.onopen = () => { document.title = "WS-OPENED"; };
   } catch (e) {}
-  window.__ice = [];
-  try {
-    const pc = new RTCPeerConnection({iceServers: [{urls: "stun:127.0.0.1:3478"}]});
-    pc.createDataChannel("x");
-    pc.onicecandidate = (e) => { if (e.candidate) window.__ice.push(e.candidate.candidate); };
-    pc.createOffer().then(o => pc.setLocalDescription(o));
-  } catch (e) {}
+  document.getElementById("rtc").textContent =
+    "RTC:" + (typeof RTCPeerConnection) + " WT:" + (typeof WebTransport);
 </script></body></html>"""
 
 
@@ -89,24 +85,14 @@ async def test_websocket_never_reaches_server(local_site):
 
 
 @pytest.mark.browser
-async def test_webrtc_gathers_no_candidates(local_site):
-    """With the WebRTC launch policy, ICE gathering must produce nothing —
-    no candidates means no STUN packets left the renderer."""
-    from playwright.async_api import async_playwright
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=True,
-            args=["--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
-                  "--disable-quic"],
-        )
-        try:
-            page = await browser.new_page()
-            await page.goto(local_site + "/", wait_until="domcontentloaded")
-            await page.wait_for_timeout(2500)
-            ice = await page.evaluate("window.__ice")
-        finally:
-            await browser.close()
-    assert ice == []
+async def test_webrtc_and_webtransport_apis_removed(local_site):
+    """Through the production path (_fetch_dynamic, real CHROMIUM_ARGS + the
+    init script), the page must see no RTCPeerConnection and no WebTransport
+    at all — no API, no TURN-over-TCP, no STUN. The marker is written
+    synchronously, so there is no timing to race."""
+    html, err = await fetching._fetch_dynamic(local_site + "/")
+    assert err == ""
+    assert "RTC:undefined WT:undefined" in html
 
 
 @pytest.mark.browser
