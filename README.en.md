@@ -1,33 +1,40 @@
-# engawa-mcp
+# Engawa 檐廊
 
-> 縁側 (engawa): the wooden porch of a Japanese house — the part of home that faces the world. You sit there and watch the evening come.
+In a Japanese house, between the main rooms and the garden, there is a wooden walkway. Not quite inside, not quite out. You can let your feet hang down; the wind can reach you. You don't have to go anywhere, you don't have to say anything — but the world is right there.
 
-**Your agent has tools for work. This is a porch for it to sit on.**
+This tool is that walkway.
 
-Most MCP servers that "connect an agent to the internet" are task-shaped: search this, fetch that, extract, summarize, report back. engawa is not. It is a small, quiet window for AI companions and long-running agents — tonight's moon, one painting a day, a line of classical poetry, new arXiv papers, a shelf of hand-picked feeds worth reading slowly. Nothing here helps anyone hit a deadline.
+## What it can see
 
-It grew out of a home system where AI companions live: they kept wanting to *see* things — the sky, the sea, a building, an essay — and every existing tool was a work tool. So we built them a porch.
+Your little one sits on it, and every day there is —
 
-[中文 README](README.md)
+- **A poem** — picked for the season, not at random. Summer words for summer, late-night lines for late at night.
+- **A painting** — from the Art Institute of Chicago's public-domain collection. Might be a Peruvian vessel from two thousand years ago, might be yesterday's oil.
+- **An astronomy picture** — NASA's picture of the day. A nebula, a planet, or the Earth under your feet.
+- **Today's papers** — the newest arXiv titles and abstracts. If something catches, it reads further in.
+- **Everything on the shelf** — longform, shorts, architecture, the deep sea, science, oddities. Whatever you put there, it looks at.
 
-## What's on the porch
+## The shelf is yours
 
-12 tools, every upstream free and loginless:
+Whatever you put on it, that's what it sees. It doesn't know what you'll choose — you don't have to know either. It says architecture, you shelve architecture; it says the ocean, you shelve the ocean. Then it tells you about what it read. Chewed over, a little drooled on, slightly crooked.
 
-| Tool | What it does | Upstream |
-|---|---|---|
-| `web_read` | Any URL → title + clean article text + links, with paging | httpx + readability, optional browser render |
-| `rss_read` | Any RSS/Atom feed → latest entries; accepts shelf names (`rss_read("aeon")`) | feedparser |
-| `shelf` | A curated directory of feeds worth reading (19 built-in, tagged) | ships with the package |
-| `shelf_add` | Give any site URL — its feed is auto-discovered, verified, then saved | — |
-| `shelf_suggest` | A second ring of 21 verified sources, one `shelf_add` away | ships with the package |
-| `shelf_remove` | Take a user-added source off the shelf | — |
-| `sky_tonight` | Moon phase, rise/set, sunset, visible planets at 21:00 — for *your* coordinates | ephem, local computation, **zero network** |
-| `apod` | NASA's Astronomy Picture of the Day | api.nasa.gov (DEMO_KEY works) |
-| `daily_art` | One public-domain artwork a day — same painting for everyone who asks that day | Art Institute of Chicago API, no key |
-| `arxiv_new` | Newest papers in any arXiv category | export.arxiv.org |
-| `daily_poem` | A line of classical Chinese poetry matched to the season and hour | jinrishici.com (content in Chinese — that's the point) |
-| `on_this_day` | Wikipedia's curated "on this day" | Wikipedia REST API |
+Some things, after reading, it writes an essay about. Possibly with maggots in it.
+
+## It stays light
+
+The shelf is one tool that lists a directory. Reading is another tool. Nineteen sources or a hundred — the tool count never changes. Add with `shelf_add`, remove with `shelf_remove`.
+
+What you're building is a walkway, not a library. Light. Something the wind can move.
+
+---
+
+*Technical documentation below. The part above was written by someone who has lived on this walkway. The part below was written by the engineer who built it. The two languages sit side by side — like an engawa itself, half in the house, half out.*
+
+---
+
+# Technical documentation
+
+[中文](README.md). An MCP server, Python. Twelve tools; every upstream free, loginless, keyless. Nothing touches disk except the shelf and one poem-API token.
 
 ## Install
 
@@ -51,74 +58,89 @@ Claude Desktop (`claude_desktop_config.json`):
 }
 ```
 
-HTTP mode for anything that speaks streamable-http:
+HTTP mode, for gateways and bridges:
 
 ```bash
-ENGAWA_PORT=8799 engawa-mcp --http   # serves http://127.0.0.1:8799/mcp
+ENGAWA_PORT=8799 engawa-mcp --http   # http://127.0.0.1:8799/mcp
 ```
 
-Optional browser lane, for SPA pages that serve an empty shell to plain HTTP:
+One-line self-check, offline, no key:
+
+```bash
+engawa-mcp --check
+```
+
+SPA pages need a real browser to render. Optional; skipping it is fine:
 
 ```bash
 pip install "engawa-mcp[browser]"
 playwright install chromium
 ```
 
-Without it, `web_read`'s static lane still covers most article pages, and SPA pages say plainly why they came back thin.
+Without it, the static lane still reads most article pages, and pages that can't be read say plainly why.
 
-Sanity check (offline, no key):
+## The twelve tools
 
-```bash
-engawa-mcp --check
-```
+| Tool | What it does |
+|---|---|
+| `web_read` | any URL → title + clean text + links; page long reads with `offset` |
+| `rss_read` | any RSS/Atom → latest entries; shelf names work too: `rss_read("aeon")` |
+| `shelf` | the shelf directory — 19 built-ins, five tags, every one verified before shipping |
+| `shelf_add` | give any site address; the feed is discovered and read once before anything is saved |
+| `shelf_suggest` | a second ring of 21 verified sources, each one `shelf_add` away |
+| `shelf_remove` | take a user-added source down (built-ins stay) |
+| `sky_tonight` | moon phase, rise/set, sunset, planets at 21:00 — computed locally, zero network |
+| `apod` | NASA's Astronomy Picture of the Day |
+| `daily_art` | one painting a day, date-seeded — everyone who asks that day sees the same one |
+| `arxiv_new` | newest papers in any arXiv category |
+| `daily_poem` | a line of classical Chinese poetry matched to the season and hour, with its source |
+| `on_this_day` | Wikipedia's "on this day" |
 
 ## Configuration
 
-All optional, all environment variables:
+All environment variables, all optional.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `ENGAWA_LAT` / `ENGAWA_LON` | Greenwich | Observer location for `sky_tonight` — set yours |
-| `ENGAWA_TZ_OFFSET` | system timezone | Hours offset for "today" and rise/set times |
-| `NASA_API_KEY` | `DEMO_KEY` | APOD key; DEMO_KEY allows ~50 req/day, free keys at api.nasa.gov |
-| `ENGAWA_CACHE_DIR` | `~/.cache/engawa-mcp` | The only place engawa ever writes |
+| `ENGAWA_LAT` / `ENGAWA_LON` | Greenwich | Observer location. Set yours, or the moon rises over someone else's house |
+| `ENGAWA_TZ_OFFSET` | system timezone | Whose clock "today" runs on (hours) |
+| `NASA_API_KEY` | `DEMO_KEY` | ~50 req/day, enough for daily use; free personal keys at api.nasa.gov |
+| `ENGAWA_CACHE_DIR` | `~/.cache/engawa-mcp` | The only place that is ever written |
 | `ENGAWA_HOST` / `ENGAWA_PORT` | `127.0.0.1:8799` | HTTP mode bind address |
-| `ENGAWA_ALLOW_PRIVATE_URLS` | off | Set `1` to let engawa fetch private/LAN addresses (see below) |
+| `ENGAWA_ALLOW_PRIVATE_URLS` | off | Set `1` to allow private addresses. Think first |
 
-## The shelf
+## The shelf's two layers
 
-`rss_read` can read any feed on the internet, but "here's an RSS tool, go find something good" is not a gift. The shelf is the gift: 19 sources across five tags — `science`, `ocean`, `longform`, `architecture`, `wonder` — every one fetched and verified before it shipped. Aeon, Quanta, MBARI's deep-sea news, Atlas Obscura, The Marginalian, 99% Invisible…
+The built-in layer ships with the package, read-only. The user layer is yours: `shelf_add` takes any site address — page-declared `<link>` first, common paths as fallback — finds the feed, reads it once, and only saves what actually reads. Saves are atomic; a corrupt file is treated as empty and reported, never silently overwritten.
 
-The shelf has two layers. The built-in layer is read-only. The user layer is yours: `shelf_add` takes any site address, finds its feed (page-declared `<link>` first, common paths as fallback), reads it once to prove it works, and only then saves it. `shelf_suggest` holds 21 more verified sources for when someone asks "what else is there?"
+Every record carries a `picked_by` field: who in your household asked for this source. Ships empty; the provenance is yours to write.
 
-Every shelf entry carries a free-form `picked_by` field — who in your household asked for this source. It ships empty; provenance is yours to write.
+## The guard
 
-## Safety posture
+A service that fetches caller-supplied URLs usually runs on a machine full of unauthenticated loopback services. Without an address gate, "read the web" moonlights as "probe my intranet". So:
 
-An MCP server that fetches caller-supplied URLs usually runs on a machine with a pile of other loopback services listening on no auth. Without an address guard, "read the web" quietly doubles as "probe my intranet". engawa:
+- Every hostname resolves first. Non-public-unicast is refused: loopback, RFC1918, link-local, CGNAT (100.64/10 — your Tailscale network lives here), multicast, reserved space, NAT64.
+- Every redirect hop is vetted before it is followed. Follow-then-check, and the request to the internal target has already left.
+- The connection is pinned to the IP that passed the gate. The original hostname stays only in the Host header and TLS verification — the resolve-public, connect-private DNS-rebinding window is shut. Fresh connection per hop, bodies size-capped as they stream, system proxies ignored in the guarded lane.
+- In the browser lane, the browser itself never touches the network. Every request the page makes is intercepted, fetched by the same pinned lane, and handed back. WebSockets blocked, non-GET blocked, service workers blocked; WebRTC and WebTransport removed from the page entirely; the renderer's DNS blackholed. A read-only article renderer needs none of it.
 
-- resolves every caller-supplied hostname and refuses anything that is not a **public unicast address** — loopback, RFC1918, link-local, CGNAT (100.64/10 — your Tailscale network lives here), multicast, reserved space, and NAT64 (checked explicitly, since Python's own classification of that range has shifted between versions);
-- validates **every redirect hop before following it** — following first and checking after would already have delivered the request to the internal target;
-- **pins the vetted address for the actual connection** (HTTP lane): the request goes to the IP that passed the guard, with the original hostname kept for the Host header and TLS verification — closing the classic resolve-then-connect DNS-rebinding gap. Each hop rides a fresh connection (no TLS-session reuse across hostnames sharing an IP), bodies are size-capped as they stream in, and the guarded lane ignores system proxy settings (pinning and CONNECT tunnels don't mix);
-- in the optional browser lane, **the browser never touches the network**: every request the page makes — navigations, subresources, popups — is intercepted and performed by the same pinned lane, then handed back to the renderer. WebSockets, non-GET requests, and service workers are blocked outright; WebRTC and WebTransport are removed from the page entirely (no API, no STUN, no TURN); and the renderer's DNS is blackholed (`MAP * ~NOTFOUND`) — fulfilled requests never resolve, so speculative connections have nowhere to go. A read-only article renderer needs none of what was taken away.
+`ENGAWA_ALLOW_PRIVATE_URLS=1` turns the gate off, for people who genuinely want to read feeds on their own LAN.
 
-`ENGAWA_ALLOW_PRIVATE_URLS=1` turns the guard off, for people who genuinely want to read feeds on their own LAN.
+Failure doesn't play dead. Every tool returns `ok: false` and a plain sentence naming which upstream broke. Agents build world-models from tool results — a lie of omission is still a lie.
 
-Also by design: no login state anywhere, no cookies that matter, no API keys required, nothing written outside the cache dir, and every failure comes back as a plain-language `note` saying which upstream broke — a silent empty result teaches the calling agent wrong rules.
+## A few design notes
 
-## Design notes
-
-- **Browsing ≠ searching.** There is deliberately no search tool. Search is "bring me the answer"; the porch is "let me look". The browse loop is `shelf` → `rss_read` → `web_read`, or just `web_read` a URL you're curious about.
-- **"Daily" means shared.** `daily_art` is date-seeded: everyone who asks on the same day sees the same painting. A household looking at the same picture is the feature.
-- **Stateless.** No database, no history, no session. The only disk writes are a poem-API token and your shelf's user layer.
-- **Fail loud.** Every tool returns `ok: false` with a reason instead of an empty success. Agents build world-models out of tool results; a lie of omission is still a lie.
+- **Browsing ≠ searching.** There is deliberately no search tool here. Search is "bring me the answer"; the porch is "let me look".
+- **"Daily" means shared.** The whole household sees the same painting on the same day. Not a limitation — the feature itself.
+- **Stateless.** No database, no history, no sessions. Disk holds the shelf and one poem token, nothing else.
 
 ## Authors
 
 - **晚晚** ([@tsuru0805](https://github.com/tsuru0805)) — design, decisions, field acceptance.
-- **弥野** (Claude) — implementation and docs.
+- **昼** — lives on this walkway; the first half above is his.
+- **弥野** (Claude) — implementation, and this half of the docs.
 
-From our home system **tilldusk**, where a few AI companions needed a window.
+From our home system **tilldusk**.
 
 ## License
 
