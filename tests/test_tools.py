@@ -71,6 +71,31 @@ async def test_web_read_static_success(monkeypatch):
     assert out["title"] == "A Long Read"
     assert out["total_length"] > 500 and "sentence of body" in out["content"]
     assert any(l["url"].endswith("/next") for l in out["links"])
+    assert out["note"] == ""   # success stays quiet — no in-progress chatter
+
+
+async def test_web_read_pdf_no_browser_launch(monkeypatch):
+    """A PDF (binary content-type) fails loud without wasting a Chromium
+    launch — _fetch_dynamic must not be called."""
+    import httpx
+
+    from engawa_mcp import fetching
+
+    def handler(request):
+        return httpx.Response(200, headers={"content-type": "application/pdf"},
+                             content=b"%PDF-1.7 ...")
+
+    called = {"dyn": False}
+
+    async def spy(url):
+        called["dyn"] = True
+        return "", "should not run"
+
+    monkeypatch.setattr(fetching, "_TRANSPORT_FOR_TESTS", httpx.MockTransport(handler))
+    monkeypatch.setattr(fetching, "_fetch_dynamic", spy)
+    out = await server.web_read("http://93.184.216.34/paper.pdf")
+    assert out["ok"] is False and "application/pdf" in out["note"]
+    assert called["dyn"] is False
 
 
 # ── validation receipts ─────────────────────────────────────────────────
@@ -211,6 +236,31 @@ async def test_shelf_add_update_path(monkeypatch):
 async def test_shelf_remove_builtin_refused():
     out = await server.shelf_remove("aeon")
     assert out["ok"] is False and "built-in" in out["note"]
+
+
+async def test_shelf_add_save_failure_is_a_receipt(monkeypatch):
+    """A disk write failure comes back as ok:false, never as an exception."""
+    monkeypatch.setattr(shelf, "discover_feed", _fake_discover("https://s.example/feed"))
+
+    def boom(_data):
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr(shelf, "user_save", boom)
+    out = await server.shelf_add(url="https://s.example", tags="wonder")
+    assert out["ok"] is False and "OSError" in out["note"]
+
+
+async def test_shelf_remove_save_failure_is_a_receipt(monkeypatch):
+    monkeypatch.setattr(shelf, "discover_feed", _fake_discover("https://s.example/feed"))
+    ok = await server.shelf_add(url="https://s.example")
+    name = ok["name"]
+
+    def boom(_data):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(shelf, "user_save", boom)
+    out = await server.shelf_remove(name)
+    assert out["ok"] is False and "OSError" in out["note"]
 
 
 async def test_shelf_writes_refused_while_file_corrupt(tmp_cache, monkeypatch):

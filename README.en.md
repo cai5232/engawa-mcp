@@ -34,7 +34,7 @@ What you're building is a walkway, not a library. Light. Something the wind can 
 
 # Technical documentation
 
-[中文](README.md). An MCP server, Python. Twelve tools; every upstream free, loginless, keyless. Nothing touches disk except the shelf and one poem-API token.
+[中文](https://github.com/tsuru0805/engawa-mcp/blob/main/README.md). An MCP server, Python. Twelve tools; every upstream free and loginless, no API key needed. Nothing persists on disk beyond the shelf and one poem-API token.
 
 ## Install
 

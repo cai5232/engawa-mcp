@@ -34,7 +34,7 @@
 
 # 技术文档
 
-[English](README.en.md)。MCP server，Python。十二件工具，上游全部免费、免登录、免 key。除了书架和一张诗词 token，什么都不落盘。
+[English](README.en.md)。MCP server，Python。十二件工具，上游全部免费、免登录、不要 key。除了书架和一张诗词 token，盘上什么都不留。
 
 ## 装
 

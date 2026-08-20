@@ -23,6 +23,28 @@ UA = {"User-Agent": "engawa-mcp/0.1 (https://github.com/tsuru0805/engawa-mcp)"}
 
 _MAX_HOPS = 5
 
+
+def _merge_headers(*layers: dict) -> dict:
+    """Case-insensitive header merge: later layers win, and a differently-cased
+    duplicate (e.g. UA's "User-Agent" vs Chromium's "user-agent") collapses
+    onto the first spelling seen instead of both surviving into two wire
+    headers — which would defeat the UA and is a smuggling-shaped footgun."""
+    out: dict[str, str] = {}
+    canon: dict[str, str] = {}  # lowercased name -> the spelling we keep
+    for layer in layers:
+        for k, v in (layer or {}).items():
+            lk = k.lower()
+            out[canon.setdefault(lk, k)] = v
+    return out
+
+
+def _fmt_bytes(n: int) -> str:
+    if n >= 1024 * 1024:
+        return f"{n // (1024 * 1024)} MB"
+    if n >= 1024:
+        return f"{n // 1024} KB"
+    return f"{n} bytes"
+
 # NAT64 (RFC 6052). Checked explicitly because ipaddress classification of
 # this range has shifted between CPython versions — the guard's behavior must
 # not depend on which interpreter it happens to run under.
@@ -119,7 +141,7 @@ async def guarded_get(url: str, timeout: float = 15.0, headers: dict | None = No
     """
     seen: set[str] = set()
     cur = url
-    req_headers = {**UA, **(headers or {})}
+    req_headers = _merge_headers(UA, headers or {})
     for _hop in range(_MAX_HOPS + 1):
         err, _scheme, host = _split_scheme_host(cur)
         if err:
@@ -128,20 +150,35 @@ async def guarded_get(url: str, timeout: float = 15.0, headers: dict | None = No
             return None, "redirect loop"
         seen.add(cur)
         if config.ALLOW_PRIVATE_URLS:
-            target, hop_headers, extensions = httpx.URL(cur), req_headers, {}
+            orig = httpx.URL(cur)
+            targets, hop_headers, extensions = [orig], req_headers, {}
         else:
             err, ips = await _resolve_guard(host)
             if err:
                 return None, (err if cur == url else f"after a redirect, {err}")
             orig = httpx.URL(cur)
-            target = orig.copy_with(host=ips[0])
-            hop_headers = {**req_headers, "Host": _authority(host, orig.port)}
+            # Try every vetted address, not just the first — a dual-stack host
+            # with broken IPv6 routing would otherwise fail with no fallback
+            # (Happy Eyeballs, minus the parallelism). All already passed the
+            # gate, so falling down the list on a connect error is free.
+            targets = [orig.copy_with(host=ip) for ip in ips]
+            hop_headers = _merge_headers(req_headers, {"Host": _authority(host, orig.port)})
             extensions = {"sni_hostname": host}
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=False,
                                      trust_env=False, transport=transport) as client:
-            req = client.build_request("GET", target, headers=hop_headers,
-                                       extensions=extensions)
-            resp = await client.send(req, stream=True)
+            resp = None
+            connect_err = None
+            for target in targets:
+                req = client.build_request("GET", target, headers=hop_headers,
+                                           extensions=extensions)
+                try:
+                    resp = await client.send(req, stream=True)
+                    break
+                except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+                    connect_err = e  # try the next vetted address
+            if resp is None:
+                return None, (f"could not connect ({type(connect_err).__name__})"
+                              if connect_err else "could not connect")
             try:
                 if resp.status_code in (301, 302, 303, 307, 308):
                     loc = (resp.headers or {}).get("location") or ""
@@ -155,8 +192,7 @@ async def guarded_get(url: str, timeout: float = 15.0, headers: dict | None = No
                 async for chunk in resp.aiter_bytes():
                     total += len(chunk)
                     if max_bytes is not None and total > max_bytes:
-                        return None, (f"response too large "
-                                      f"(over {max_bytes // (1024 * 1024) or 1} MB)")
+                        return None, f"response too large (over {_fmt_bytes(max_bytes)})"
                     chunks.append(chunk)
             finally:
                 await resp.aclose()

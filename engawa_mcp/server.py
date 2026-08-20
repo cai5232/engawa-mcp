@@ -26,17 +26,21 @@ from mcp.server import MCPServer
 from . import config, feeds, fetching, net, shelf, sky
 from .feeds import err as _err
 
+from . import __version__
+
 log = logging.getLogger("engawa")
 
 mcp = MCPServer(
     name="engawa",
+    version=__version__,
     instructions=("engawa: a porch for looking at the world — web pages, RSS, "
                   "a curated feed shelf, tonight's sky, and a few daily "
                   "delights. Public information only, no logins."),
 )
 
-# The dynamic-render fallback shares one Playwright profile; serialize to
-# avoid cross-call profile lock contention. Low-concurrency use in mind.
+# The dynamic-render fallback drives one Chromium at a time; serialize so
+# concurrent web_read calls don't launch overlapping browsers. Low-concurrency
+# use in mind.
 _web_read_lock = asyncio.Lock()
 _poem_token_lock = asyncio.Lock()
 
@@ -69,7 +73,7 @@ async def web_read(url: str, offset: int = 0, length: int = 3000) -> dict:
         return {"ok": False, "title": "", "content": "", "total_length": 0,
                 "links": [], "note": note}
 
-    if re.match(r"https?://(www\.|mobile\.)?(twitter\.com|x\.com)/", url or ""):
+    if re.match(r"https?://(www\.|mobile\.)?(twitter\.com|x\.com)/", url or "", re.I):
         return _fail("x.com sits behind a login wall; engawa reads the open web only")
     guard = await net.url_public_ok(url)
     if guard:
@@ -188,7 +192,12 @@ async def shelf_add(url: str, name: str = "", note: str = "", tags: str = "",
         user[name] = {"title": probe.get("feed_title") or name, "url": feed_url,
                       "tags": tag_list, "note": (note or "")[:200],
                       "picked_by": re.sub(r"\s+", " ", str(picked_by or "")).strip()[:shelf.PICKED_BY_MAX]}
-        shelf.user_save(user)
+        try:
+            shelf.user_save(user)
+        except OSError as e:
+            return _err(f"couldn't write the shelf ({type(e).__name__}) — "
+                        "check ENGAWA_CACHE_DIR is writable",
+                        name=name, feed_title="", feed_url=feed_url)
     return {"ok": True, "name": name, "feed_title": probe.get("feed_title", ""),
             "feed_url": feed_url, "note": "updated" if existed else "added"}
 
@@ -241,7 +250,11 @@ async def shelf_remove(name: str) -> dict:
             return _err(f"not removed: {lerr}", name=name)
         if name in user:  # user layer first: shadowed hand-edited records stay removable
             del user[name]
-            shelf.user_save(user)
+            try:
+                shelf.user_save(user)
+            except OSError as e:
+                return _err(f"couldn't write the shelf ({type(e).__name__}) — "
+                            "check ENGAWA_CACHE_DIR is writable", name=name)
             return {"ok": True, "name": name, "note": "removed"}
     if name in shelf.BUILTIN:
         return _err(f"'{name}' is built-in and cannot be removed", name=name)

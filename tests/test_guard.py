@@ -161,6 +161,68 @@ def test_ipv6_host_authority():
     assert net._authority("2606:4700::1111", 8443) == "[2606:4700::1111]:8443"
 
 
+def test_merge_headers_case_insensitive():
+    # A lowercase duplicate collapses onto the first spelling — one wire header.
+    merged = net._merge_headers({"User-Agent": "ua-default"},
+                                {"user-agent": "ua-override", "Accept": "x"})
+    assert merged == {"User-Agent": "ua-override", "Accept": "x"}
+
+
+def test_fmt_bytes():
+    assert net._fmt_bytes(100) == "100 bytes"
+    assert net._fmt_bytes(2048) == "2 KB"
+    assert net._fmt_bytes(5 * 1024 * 1024) == "5 MB"
+
+
+async def test_single_user_agent_on_wire():
+    """UA merge must not emit two User-Agent headers (Chromium sends a
+    lowercase one; the default is title-cased)."""
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["ua"] = request.headers.get_list("user-agent")
+        return httpx.Response(200)
+
+    await net.guarded_get("http://93.184.216.34/",
+                          headers={"user-agent": "chromium-ua", "accept": "z"},
+                          transport=httpx.MockTransport(handler))
+    assert seen["ua"] == ["chromium-ua"]
+
+
+async def test_happy_eyeballs_falls_through(monkeypatch):
+    """First vetted IP refuses the connection; the second answers."""
+    async def two_ips(host):
+        return "", ["203.0.113.1", "203.0.113.2"]
+
+    monkeypatch.setattr(net, "_resolve_guard", two_ips)
+    tried = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        tried.append(request.url.host)
+        if request.url.host == "203.0.113.1":
+            raise httpx.ConnectError("refused")
+        return httpx.Response(200, content=b"second")
+
+    resp, err = await net.guarded_get("http://site.example/",
+                                      transport=httpx.MockTransport(handler))
+    assert err == "" and resp.content == b"second"
+    assert tried == ["203.0.113.1", "203.0.113.2"]
+
+
+async def test_all_ips_refuse(monkeypatch):
+    async def two_ips(host):
+        return "", ["203.0.113.1", "203.0.113.2"]
+
+    monkeypatch.setattr(net, "_resolve_guard", two_ips)
+
+    def handler(request):
+        raise httpx.ConnectError("refused")
+
+    resp, err = await net.guarded_get("http://site.example/",
+                                      transport=httpx.MockTransport(handler))
+    assert resp is None and "connect" in err
+
+
 async def test_dns_pinning_keeps_nondefault_port(monkeypatch):
     async def fake_resolve(host):
         return "", ["93.184.216.34"]

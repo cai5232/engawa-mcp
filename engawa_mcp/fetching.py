@@ -69,24 +69,30 @@ for (const k of ["RTCPeerConnection", "webkitRTCPeerConnection",
 _TRANSPORT_FOR_TESTS = None
 
 
-async def _fetch_static(url: str) -> tuple[str, str]:
+async def _fetch_static(url: str) -> tuple[str, str, bool]:
     """Fetch raw HTML through the guarded, DNS-pinned lane (net.guarded_get):
     every redirect hop is vetted before it is followed. Returns
-    (html, error_note); empty html = failure."""
+    (html, error_note, renderable); empty html = failure, and renderable=False
+    means the browser lane won't help either (a PDF or image is not a page)."""
     try:
         resp, err = await net.guarded_get(url, timeout=20.0,
                                           headers=BROWSER_HEADERS,
                                           max_bytes=PAGE_MAX_BYTES,
                                           transport=_TRANSPORT_FOR_TESTS)
     except httpx.TimeoutException:
-        return "", "static fetch timed out"
+        return "", "static fetch timed out", True
     except Exception as e:  # noqa: BLE001
-        return "", f"static fetch failed: {type(e).__name__}"
+        return "", f"static fetch failed: {type(e).__name__}", True
     if resp is None:
-        return "", err or "static fetch failed"
+        return "", err or "static fetch failed", True
     if resp.status_code != 200:
-        return "", f"HTTP {resp.status_code}"
-    return resp.text, ""
+        return "", f"HTTP {resp.status_code}", True
+    ctype = (resp.headers.get("content-type") or "").lower()
+    if ctype and not any(t in ctype for t in ("html", "xml", "text")):
+        # Binary body (PDF, image, zip…). The browser lane can't help — a PDF
+        # triggers a download, not a page — so don't waste a Chromium launch.
+        return "", f"not a readable web page (content-type: {ctype.split(';')[0].strip()})", False
+    return resp.text, "", True
 
 
 async def _fetch_dynamic(url: str) -> tuple[str, str]:
@@ -233,28 +239,32 @@ async def open_page(url: str, offset: int = 0, length: int = 3000) -> dict:
     Returns {title, content, total_length, links, note}. The URL is assumed
     to have passed the SSRF guard already (web_read does that).
     """
-    html, static_err = await _fetch_static(url)
+    html, static_err, renderable = await _fetch_static(url)
     parsed = extract(html, url) if html else None
 
-    note_parts = []
-    needs_dynamic = parsed is None or len(parsed["content"]) < SPA_CONTENT_THRESHOLD
+    # parsed is None only when the static lane got nothing (empty html), which
+    # always carries a static_err — so the static reason is the right one to
+    # report on total failure. The browser lane can still rescue a page whose
+    # static text was merely thin; its failure never overwrites the first-hand
+    # static reason.
+    needs_dynamic = renderable and (parsed is None
+                                    or len(parsed["content"]) < SPA_CONTENT_THRESHOLD)
     if needs_dynamic:
-        note_parts.append(f"static: {static_err}" if not html else "thin static text, trying browser render")
-        dyn_html, dyn_err = await _fetch_dynamic(url)
+        dyn_html, _dyn_err = await _fetch_dynamic(url)
         if dyn_html:
             parsed = extract(dyn_html, url)
-        elif parsed is None:
-            note_parts.append(dyn_err)
-            return {"title": "", "content": "", "total_length": 0, "links": [],
-                    "note": " / ".join(p for p in note_parts if p) or "unreachable"}
-        else:
-            note_parts.append(dyn_err)
+
+    if parsed is None:
+        return {"title": "", "content": "", "total_length": 0, "links": [],
+                "note": static_err or "no readable content at that URL"}
 
     total = len(parsed["content"])
     sliced = parsed["content"][offset:offset + length] if length else parsed["content"][offset:]
 
-    note = " / ".join(p for p in note_parts if p)
-    if total < 100 and not note:
+    # Success receipt: stay quiet unless there's a real signal to flag. The
+    # in-progress "trying browser render" chatter never belongs on a success.
+    note = ""
+    if total < 100:
         haystack = (parsed["title"] + parsed["content"]).lower()
         if any(kw in haystack for kw in ("log in", "sign in", "verify")):
             note = "the page may require a login"

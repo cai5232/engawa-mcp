@@ -44,6 +44,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.check:
         return _check()
 
+    # httpx logs every request URL at INFO; in stdio mode the host captures
+    # stderr to disk, so that would write a browsing trail — off-message for a
+    # tool whose whole point is "no history". Quiet it at run time only, never
+    # at import (a library shouldn't reconfigure someone else's logging).
+    import logging
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+
     from . import config
     from .server import mcp
     if args.http:
