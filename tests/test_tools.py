@@ -98,6 +98,26 @@ async def test_web_read_pdf_no_browser_launch(monkeypatch):
     assert called["dyn"] is False
 
 
+async def test_web_read_html_mislabeled_octet_stream(monkeypatch):
+    """Real HTML served as application/octet-stream is sniffed and read, not
+    rejected on content-type alone."""
+    import httpx
+
+    from engawa_mcp import fetching
+
+    html = ("<!doctype html><html><head><title>Mislabeled</title></head><body>"
+            "<article>" + "<p>plenty of real body text here </p>" * 30
+            + "</article></body></html>")
+
+    def handler(request):
+        return httpx.Response(200, headers={"content-type": "application/octet-stream"},
+                             text=html)
+
+    monkeypatch.setattr(fetching, "_TRANSPORT_FOR_TESTS", httpx.MockTransport(handler))
+    out = await server.web_read("http://93.184.216.34/page")
+    assert out["ok"] is True and out["title"] == "Mislabeled"
+
+
 # ── validation receipts ─────────────────────────────────────────────────
 
 async def test_sky_tonight_bad_date():

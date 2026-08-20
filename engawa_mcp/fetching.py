@@ -89,9 +89,13 @@ async def _fetch_static(url: str) -> tuple[str, str, bool]:
         return "", f"HTTP {resp.status_code}", True
     ctype = (resp.headers.get("content-type") or "").lower()
     if ctype and not any(t in ctype for t in ("html", "xml", "text")):
-        # Binary body (PDF, image, zip…). The browser lane can't help — a PDF
-        # triggers a download, not a page — so don't waste a Chromium launch.
-        return "", f"not a readable web page (content-type: {ctype.split(';')[0].strip()})", False
+        # Content-type says binary (PDF, image, zip…). The browser lane can't
+        # help — a PDF triggers a download, not a page — so don't waste a
+        # Chromium launch. But some misconfigured servers send real HTML as
+        # application/octet-stream; sniff the first bytes before giving up.
+        head = (resp.content or b"")[:512].lstrip().lower()
+        if not head.startswith((b"<!doctype", b"<html")):
+            return "", f"not a readable web page (content-type: {ctype.split(';')[0].strip()})", False
     return resp.text, "", True
 
 
@@ -242,11 +246,11 @@ async def open_page(url: str, offset: int = 0, length: int = 3000) -> dict:
     html, static_err, renderable = await _fetch_static(url)
     parsed = extract(html, url) if html else None
 
-    # parsed is None only when the static lane got nothing (empty html), which
-    # always carries a static_err — so the static reason is the right one to
-    # report on total failure. The browser lane can still rescue a page whose
-    # static text was merely thin; its failure never overwrites the first-hand
-    # static reason.
+    # parsed is None when the static lane produced no HTML. That normally
+    # carries a static_err (a fetch/HTTP/content-type failure); the lone
+    # exception — a 200 with an empty body — falls back to a generic message
+    # below. The browser lane can still rescue a page whose static text was
+    # merely thin; its failure never overwrites the first-hand static reason.
     needs_dynamic = renderable and (parsed is None
                                     or len(parsed["content"]) < SPA_CONTENT_THRESHOLD)
     if needs_dynamic:
