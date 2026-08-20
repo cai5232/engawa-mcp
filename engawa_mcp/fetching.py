@@ -31,7 +31,8 @@ BROWSER_HEADERS = {
 # Static text shorter than this ⇒ probably an SPA shell, try the browser lane.
 SPA_CONTENT_THRESHOLD = 500
 MAX_LINKS = 20
-PAGE_MAX_BYTES = 20 * 1024 * 1024  # streamed-in cap; larger pages are refused
+PAGE_MAX_BYTES = 20 * 1024 * 1024        # per-response cap, streamed in
+AGGREGATE_MAX_BYTES = 64 * 1024 * 1024   # per-render cap across all requests
 
 # Test seam: injected into guarded_get so the static lane's redirect handling
 # is testable with httpx.MockTransport. None in production.
@@ -70,7 +71,9 @@ async def _fetch_dynamic(url: str) -> tuple[str, str]:
     lane uses, then fulfilled back into the renderer — so the pin, per-hop
     redirect vetting, and size caps all apply here too. WebSockets are blocked
     outright (a read-only article renderer has no business opening one), as
-    are non-GET requests and service workers. Known trade-off: redirects
+    are non-GET requests and service workers; WebRTC's direct-UDP path and
+    QUIC (WebTransport's carrier) are disabled at browser launch, since
+    neither passes through the route layer. Known trade-off: redirects
     collapse into the original request, so page.url stays the pre-redirect
     URL; relative links are resolved by the extractor against the caller's
     URL, which matches that behavior.
@@ -82,9 +85,12 @@ async def _fetch_dynamic(url: str) -> tuple[str, str]:
                     "browser lane: pip install 'engawa-mcp[browser]' && "
                     "playwright install chromium")
 
+    consumed = 0  # aggregate page budget — one hostile SPA can't stream forever
+
     async def _guard_route(route):
+        nonlocal consumed
         try:
-            if route.request.method != "GET":
+            if route.request.method != "GET" or consumed >= AGGREGATE_MAX_BYTES:
                 await route.abort()
                 return
             fwd = {k: v for k, v in (route.request.headers or {}).items()
@@ -96,8 +102,13 @@ async def _fetch_dynamic(url: str) -> tuple[str, str]:
             if resp is None:
                 await route.abort()
                 return
+            consumed += len(resp.content)
+            # set-cookie dropped: fulfill() takes a flat dict, so repeated
+            # Set-Cookie fields would merge into one invalid value — and the
+            # ephemeral context has no business keeping cookies anyway.
             await route.fulfill(status=resp.status_code,
-                                headers=dict(resp.headers),
+                                headers={k: v for k, v in resp.headers.items()
+                                         if k.lower() != "set-cookie"},
                                 body=resp.content)
         except Exception:  # noqa: BLE001 — guard failure = don't fetch
             try:
@@ -112,7 +123,18 @@ async def _fetch_dynamic(url: str) -> tuple[str, str]:
 
     try:
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
+            browser = await p.chromium.launch(
+                headless=True,
+                args=[
+                    # WebRTC can emit STUN over UDP without ever hitting the
+                    # route layer — a direct network path around the guard.
+                    # With no proxy configured, this policy silences it
+                    # (verified: ICE gathering yields zero candidates).
+                    "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+                    # QUIC would let WebTransport talk UDP around the guard.
+                    "--disable-quic",
+                ],
+            )
             try:
                 ctx = await browser.new_context(
                     user_agent=BROWSER_HEADERS["User-Agent"],
