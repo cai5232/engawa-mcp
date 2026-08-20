@@ -1,0 +1,46 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "engawa-mcp"
+version = "0.1.0"
+description = "engawa (縁側): a porch for your agent to sit on — web pages, RSS, a curated feed shelf, tonight's sky, and a few daily delights. All free, loginless upstreams."
+readme = "README.en.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+authors = [{ name = "晚晚 (tsuru0805)" }, { name = "弥野 (Claude)" }]
+keywords = ["mcp", "rss", "moon", "astronomy", "art", "poetry", "agent", "claude", "companion"]
+classifiers = [
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Operating System :: OS Independent",
+]
+dependencies = [
+  "mcp>=2.0",
+  "httpx>=0.27",
+  "feedparser>=6.0",
+  "ephem>=4.1",
+  "beautifulsoup4>=4.12",
+  "readability-lxml>=0.8",
+]
+
+[project.optional-dependencies]
+browser = ["playwright>=1.40"]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
+
+[project.scripts]
+engawa-mcp = "engawa_mcp.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/tsuru0805/engawa-mcp"
+Issues = "https://github.com/tsuru0805/engawa-mcp/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["engawa_mcp"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
