@@ -42,7 +42,12 @@ async def test_web_read_static_lane_blocks_redirect_to_private(monkeypatch):
         hits.append(str(request.url))
         return httpx.Response(302, headers={"location": "http://192.168.1.1/panel"})
 
+    async def no_browser(url):
+        return "", "dynamic rendering unavailable"
+
     monkeypatch.setattr(fetching, "_TRANSPORT_FOR_TESTS", httpx.MockTransport(handler))
+    # keep the test hermetic even when the optional browser lane is installed
+    monkeypatch.setattr(fetching, "_fetch_dynamic", no_browser)
     out = await server.web_read("http://93.184.216.34/page")
     assert out["ok"] is False and "redirect" in out["note"]
     assert all("192.168.1.1" not in h for h in hits)

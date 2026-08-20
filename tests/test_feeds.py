@@ -27,7 +27,7 @@ def tmp_cache(tmp_path, monkeypatch):
 
 
 def _stub_get(result):
-    async def fake(url, timeout=15.0, transport=None):
+    async def fake(url, **kwargs):
         return result, "" if result is not None else "boom"
     return fake
 
@@ -96,7 +96,7 @@ async def test_discovery_prefers_declared_link(monkeypatch):
 
     html = b'<!doctype html><head><link rel="alternate" type="application/rss+xml" href="/found.xml"></head>'
 
-    async def fake_get(url, timeout=15.0, transport=None):
+    async def fake_get(url, **kwargs):
         return FakeResp(200, html, {"content-type": "text/html"}, url=url), ""
 
     monkeypatch.setattr(feeds, "read_feed", fake_read)
@@ -110,7 +110,7 @@ async def test_discovery_gives_up_politely(monkeypatch):
     async def fake_read(url, limit=10):
         return feeds.err("not a feed", feed_title="", entries=[])
 
-    async def fake_get(url, timeout=15.0, transport=None):
+    async def fake_get(url, **kwargs):
         return FakeResp(200, b"<!doctype html><head></head>", {"content-type": "text/html"}, url=url), ""
 
     monkeypatch.setattr(feeds, "read_feed", fake_read)
@@ -128,7 +128,7 @@ async def test_discovery_candidate_budget(monkeypatch):
         calls.append(url)
         return feeds.err("not a feed", feed_title="", entries=[])
 
-    async def fake_get(url, timeout=15.0, transport=None):
+    async def fake_get(url, **kwargs):
         return FakeResp(200, b"<!doctype html><head></head>", {"content-type": "text/html"}, url=url), ""
 
     monkeypatch.setattr(feeds, "read_feed", fake_read)

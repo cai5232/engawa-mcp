@@ -85,57 +85,91 @@ async def url_public_ok(url: str) -> str:
     return err
 
 
+def _authority(host: str, port: int | None) -> str:
+    """HTTP authority for a Host header. IPv6 literals must be bracketed."""
+    h = f"[{host}]" if ":" in host else host
+    return h if port is None else f"{h}:{port}"
+
+
 async def guarded_get(url: str, timeout: float = 15.0, headers: dict | None = None,
-                      transport=None):
+                      max_bytes: int | None = None, transport=None):
     """GET a caller-supplied URL, validating every redirect hop before it is
     followed **and pinning the vetted address for the actual connection**.
 
-    The pin closes the classic resolve-then-connect DNS-rebinding gap: the
-    request is sent to the address that passed the guard (URL host swapped to
-    the vetted IP, original hostname carried in the Host header and as the TLS
+    The pin closes the classic resolve-then-connect DNS-rebinding gap: each
+    hop is sent to the address that passed the guard (URL host swapped to the
+    vetted IP, original hostname carried in the Host header and as the TLS
     server name), so a hostile DNS server cannot answer public on the first
-    lookup and private on the second.
+    lookup and private on the second. Two deliberate consequences:
 
-    Returns (response, err): a final non-3xx response, or an error string
-    explaining why no response was obtained (loops, too many hops, a hop
-    pointing at private address space, missing Location header).
-    `transport` exists for tests (httpx.MockTransport).
+    - every hop uses a **fresh connection** (no pooling), so a TLS session
+      established for one hostname can never be reused for another hostname
+      that happens to resolve to the same pinned IP;
+    - system proxy settings are ignored (`trust_env=False`) — a CONNECT
+      tunnel to a pinned IP cannot carry the original hostname's certificate
+      identity, so pinning and proxies do not mix.
+
+    `max_bytes` caps the body as it streams in — the response is dropped the
+    moment it exceeds the cap, not after it has been buffered.
+
+    Returns (response, err): a final non-3xx response (rebuilt with the body
+    already read; `resp.logical_url` carries the last *hostname* URL for
+    resolving relative links), or an error string explaining why no response
+    was obtained. `transport` exists for tests (httpx.MockTransport).
     """
     seen: set[str] = set()
     cur = url
     req_headers = {**UA, **(headers or {})}
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=False,
-                                 transport=transport) as client:
-        for _hop in range(_MAX_HOPS + 1):
-            err, _scheme, host = _split_scheme_host(cur)
+    for _hop in range(_MAX_HOPS + 1):
+        err, _scheme, host = _split_scheme_host(cur)
+        if err:
+            return None, (err if cur == url else f"after a redirect, {err}")
+        if cur in seen:
+            return None, "redirect loop"
+        seen.add(cur)
+        if config.ALLOW_PRIVATE_URLS:
+            target, hop_headers, extensions = httpx.URL(cur), req_headers, {}
+        else:
+            err, ips = await _resolve_guard(host)
             if err:
                 return None, (err if cur == url else f"after a redirect, {err}")
-            if cur in seen:
-                return None, "redirect loop"
-            seen.add(cur)
-            if config.ALLOW_PRIVATE_URLS:
-                resp = await client.get(cur, headers=req_headers)
-            else:
-                err, ips = await _resolve_guard(host)
-                if err:
-                    return None, (err if cur == url else f"after a redirect, {err}")
-                target = httpx.URL(cur)
-                pinned = target.copy_with(host=ips[0])
-                # Host header keeps the original authority (with port when
-                # non-default); sni_hostname keeps TLS handshake + certificate
-                # verification against the real hostname.
-                authority = host if target.port is None else f"{host}:{target.port}"
-                resp = await client.get(
-                    pinned, headers={**req_headers, "Host": authority},
-                    extensions={"sni_hostname": host},
-                )
-            if resp.status_code in (301, 302, 303, 307, 308):
-                loc = (getattr(resp, "headers", None) or {}).get("location") or ""
-                if not loc:
-                    return None, f"redirect without a Location header (HTTP {resp.status_code})"
-                cur = str(httpx.URL(cur).join(loc))
-                continue
-            return resp, ""
+            orig = httpx.URL(cur)
+            target = orig.copy_with(host=ips[0])
+            hop_headers = {**req_headers, "Host": _authority(host, orig.port)}
+            extensions = {"sni_hostname": host}
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False,
+                                     trust_env=False, transport=transport) as client:
+            req = client.build_request("GET", target, headers=hop_headers,
+                                       extensions=extensions)
+            resp = await client.send(req, stream=True)
+            try:
+                if resp.status_code in (301, 302, 303, 307, 308):
+                    loc = (resp.headers or {}).get("location") or ""
+                    if not loc:
+                        return None, (f"redirect without a Location header "
+                                      f"(HTTP {resp.status_code})")
+                    cur = str(httpx.URL(cur).join(loc))
+                    continue
+                chunks: list[bytes] = []
+                total = 0
+                async for chunk in resp.aiter_bytes():
+                    total += len(chunk)
+                    if max_bytes is not None and total > max_bytes:
+                        return None, (f"response too large "
+                                      f"(over {max_bytes // (1024 * 1024) or 1} MB)")
+                    chunks.append(chunk)
+            finally:
+                await resp.aclose()
+        # aiter_bytes() already decompressed the body — carrying the original
+        # content-encoding/length headers into the rebuilt response would make
+        # httpx decompress a second time (DecodingError on gzip feeds).
+        out_headers = [(k, v) for k, v in resp.headers.items()
+                       if k.lower() not in ("content-encoding", "content-length",
+                                            "transfer-encoding")]
+        out = httpx.Response(resp.status_code, headers=out_headers,
+                             content=b"".join(chunks), request=req)
+        out.logical_url = cur  # the hostname URL, for resolving relative links
+        return out, ""
     return None, f"too many redirects (more than {_MAX_HOPS})"
 
 

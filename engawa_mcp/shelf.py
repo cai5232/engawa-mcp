@@ -353,23 +353,31 @@ async def _discover_inner(site_url: str, max_try: int, net) -> tuple[str, dict |
         return site_url, probe, ""
     cands: list[str] = []
     try:
-        resp, err = await net.guarded_get(site_url, timeout=15.0)
+        resp, err = await net.guarded_get(site_url, timeout=15.0,
+                                          max_bytes=DISCOVER_HTML_MAX)
     except (httpx.TimeoutException, httpx.TransportError):
         resp, err = None, "site unreachable (timeout / connection failed)"
     except Exception as e:  # noqa: BLE001
         resp, err = None, f"site unreachable ({type(e).__name__})"
     if resp is None:
-        return "", None, err or "site unreachable"
-    if resp.status_code != 200:
+        # An oversized page just means no <link> candidates — the common-path
+        # guesses below still stand a chance. Anything else is fatal.
+        if "too large" not in (err or ""):
+            return "", None, err or "site unreachable"
+    elif resp.status_code != 200:
         return "", None, f"site returned HTTP {resp.status_code}"
-    ctype = (resp.headers.get("content-type") or "").lower() if getattr(resp, "headers", None) else ""
-    body = resp.content or b""
-    if "html" in ctype or body[:512].lstrip().lower().startswith((b"<!doctype", b"<html")):
-        try:
-            html = body[:DISCOVER_HTML_MAX].decode("utf-8", "ignore")
-        except Exception:  # noqa: BLE001
-            html = ""
-        cands.extend(html_feed_links(html, str(getattr(resp, "url", "") or site_url)))
+    else:
+        ctype = (resp.headers.get("content-type") or "").lower() if getattr(resp, "headers", None) else ""
+        body = resp.content or b""
+        if "html" in ctype or body[:512].lstrip().lower().startswith((b"<!doctype", b"<html")):
+            try:
+                html = body[:DISCOVER_HTML_MAX].decode("utf-8", "ignore")
+            except Exception:  # noqa: BLE001
+                html = ""
+            # Resolve relative hrefs against the *hostname* URL, never the
+            # pinned-IP request URL (guarded_get exposes it as logical_url).
+            base = str(getattr(resp, "logical_url", "") or site_url)
+            cands.extend(html_feed_links(html, base))
     root = httpx.URL(site_url)
     origin = f"{root.scheme}://{root.host}" + (f":{root.port}" if root.port else "")
     for pth in GUESS_PATHS:

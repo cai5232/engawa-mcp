@@ -38,7 +38,8 @@ async def read_feed(feed_url: str, limit: int = 10) -> dict:
         if attempt:
             await asyncio.sleep(1.5)
         try:
-            resp, fail = await net.guarded_get(feed_url, timeout=15.0)
+            resp, fail = await net.guarded_get(feed_url, timeout=15.0,
+                                               max_bytes=FEED_MAX_BYTES)
             if resp is None:
                 # Redirect-chain rejections are deterministic; don't retry.
                 return err(fail or "feed fetch failed", feed_title="", entries=[])

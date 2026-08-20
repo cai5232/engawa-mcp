@@ -124,6 +124,43 @@ async def test_dns_pinning(monkeypatch):
     assert seen["host_header"] == "site.example"
 
 
+async def test_max_bytes_streaming_cap():
+    t = _mock({"http://93.184.216.34/": (200, {}, b"x" * 5000)})
+    resp, err = await net.guarded_get("http://93.184.216.34/", max_bytes=1000, transport=t)
+    assert resp is None and "too large" in err
+    resp, err = await net.guarded_get("http://93.184.216.34/", max_bytes=10000, transport=t)
+    assert err == "" and len(resp.content) == 5000
+
+
+async def test_logical_url_survives_redirects():
+    t = _mock({
+        "http://93.184.216.34/a": (302, {"location": "http://93.184.216.35/b"}, b""),
+        "http://93.184.216.35/b": (200, {}, b"final"),
+    })
+    resp, err = await net.guarded_get("http://93.184.216.34/a", transport=t)
+    assert err == ""
+    assert resp.logical_url == "http://93.184.216.35/b"
+
+
+async def test_gzip_body_not_double_decompressed():
+    """The rebuilt response must not carry content-encoding — the body is
+    already decompressed when it is re-wrapped (regression: DecodingError on
+    every gzipped feed)."""
+    import gzip
+    t = _mock({"http://93.184.216.34/": (200, {"content-encoding": "gzip"},
+                                         gzip.compress(b"hello feed"))})
+    resp, err = await net.guarded_get("http://93.184.216.34/", transport=t)
+    assert err == "" and resp.content == b"hello feed"
+    assert "content-encoding" not in resp.headers
+
+
+def test_ipv6_host_authority():
+    assert net._authority("site.example", None) == "site.example"
+    assert net._authority("site.example", 8080) == "site.example:8080"
+    assert net._authority("2606:4700::1111", None) == "[2606:4700::1111]"
+    assert net._authority("2606:4700::1111", 8443) == "[2606:4700::1111]:8443"
+
+
 async def test_dns_pinning_keeps_nondefault_port(monkeypatch):
     async def fake_resolve(host):
         return "", ["93.184.216.34"]

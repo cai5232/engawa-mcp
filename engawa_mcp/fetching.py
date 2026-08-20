@@ -31,6 +31,7 @@ BROWSER_HEADERS = {
 # Static text shorter than this ⇒ probably an SPA shell, try the browser lane.
 SPA_CONTENT_THRESHOLD = 500
 MAX_LINKS = 20
+PAGE_MAX_BYTES = 20 * 1024 * 1024  # streamed-in cap; larger pages are refused
 
 # Test seam: injected into guarded_get so the static lane's redirect handling
 # is testable with httpx.MockTransport. None in production.
@@ -44,6 +45,7 @@ async def _fetch_static(url: str) -> tuple[str, str]:
     try:
         resp, err = await net.guarded_get(url, timeout=20.0,
                                           headers=BROWSER_HEADERS,
+                                          max_bytes=PAGE_MAX_BYTES,
                                           transport=_TRANSPORT_FOR_TESTS)
     except httpx.TimeoutException:
         return "", "static fetch timed out"
@@ -63,11 +65,11 @@ async def _fetch_dynamic(url: str) -> tuple[str, str]:
     or cache survive the call and "stateless" stays literally true.
 
     Guard posture in this lane: a browser resolves DNS itself, so the HTTP
-    lane's address pin does not apply here. Instead every request the page
-    makes (navigation, redirects, subresources) passes through a per-host
-    guard check and is aborted if it targets private address space. That is
-    request filtering, not pinning — a documented residual of the optional
-    browser lane.
+    lane's address pin does not apply here. Instead the route handler below
+    performs every fetch itself, one redirect hop at a time, vetting each hop
+    (navigations, subresources, popups alike; service workers are blocked so
+    nothing fetches around it). That is per-hop filtering, not pinning — a
+    documented residual of the optional browser lane.
     """
     try:
         from playwright.async_api import async_playwright
@@ -75,19 +77,30 @@ async def _fetch_dynamic(url: str) -> tuple[str, str]:
         return "", ("dynamic rendering unavailable — install the optional "
                     "browser lane: pip install 'engawa-mcp[browser]' && "
                     "playwright install chromium")
-    host_verdicts: dict[str, str] = {}
 
     async def _guard_route(route):
+        # Playwright follows redirects without re-invoking route handlers, so
+        # continue_() would let hop 2 go anywhere. Fetch each hop ourselves
+        # with redirects off, guarding the URL before every hop.
         try:
-            host = httpx.URL(route.request.url).host or ""
-            verdict = host_verdicts.get(host)
-            if verdict is None:
-                verdict = await net.url_public_ok(route.request.url)
-                host_verdicts[host] = verdict
-            if verdict:
-                await route.abort()
-            else:
-                await route.continue_()
+            cur = route.request.url
+            seen: set[str] = set()
+            for _hop in range(6):
+                if await net.url_public_ok(cur) or cur in seen:
+                    await route.abort()
+                    return
+                seen.add(cur)
+                resp = await route.fetch(url=cur, max_redirects=0)
+                if resp.status in (301, 302, 303, 307, 308):
+                    loc = (resp.headers or {}).get("location") or ""
+                    if not loc:
+                        await route.abort()
+                        return
+                    cur = str(httpx.URL(cur).join(loc))
+                    continue
+                await route.fulfill(response=resp)
+                return
+            await route.abort()
         except Exception:  # noqa: BLE001 — guard failure = don't fetch
             try:
                 await route.abort()
@@ -101,9 +114,10 @@ async def _fetch_dynamic(url: str) -> tuple[str, str]:
                 ctx = await browser.new_context(
                     user_agent=BROWSER_HEADERS["User-Agent"],
                     viewport={"width": 1280, "height": 900},
+                    service_workers="block",
                 )
+                await ctx.route("**/*", _guard_route)
                 page = await ctx.new_page()
-                await page.route("**/*", _guard_route)
                 await page.goto(url, wait_until="domcontentloaded", timeout=30000)
                 try:
                     # Give SPA scripts a beat to fill the DOM; not mandatory.
