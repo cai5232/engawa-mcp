@@ -60,7 +60,7 @@ def test_save_roundtrip(tmp_cache):
     shelf.user_save(data)
     loaded, err = shelf.user_load()
     assert err == "" and loaded == data
-    assert not (tmp_cache / "shelf.json.tmp").exists()
+    assert not list(tmp_cache.glob("*.tmp"))   # no temp files left behind
 
 
 def test_merged_shadowing(tmp_cache):

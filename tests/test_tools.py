@@ -26,7 +26,46 @@ async def test_web_read_blocks_private():
 
 async def test_web_read_bad_scheme():
     out = await server.web_read("file:///etc/passwd")
-    assert out["content"] == "" and out["note"] != ""
+    assert out["ok"] is False and out["content"] == "" and out["note"] != ""
+
+
+async def test_web_read_static_lane_blocks_redirect_to_private(monkeypatch):
+    """The static lane goes through guarded_get: a public page 302ing to a
+    private address must fail without the private request ever being sent."""
+    import httpx
+
+    from engawa_mcp import fetching
+
+    hits = []
+
+    def handler(request):
+        hits.append(str(request.url))
+        return httpx.Response(302, headers={"location": "http://192.168.1.1/panel"})
+
+    monkeypatch.setattr(fetching, "_TRANSPORT_FOR_TESTS", httpx.MockTransport(handler))
+    out = await server.web_read("http://93.184.216.34/page")
+    assert out["ok"] is False and "redirect" in out["note"]
+    assert all("192.168.1.1" not in h for h in hits)
+
+
+async def test_web_read_static_success(monkeypatch):
+    import httpx
+
+    from engawa_mcp import fetching
+
+    html = ("<html><head><title>A Long Read</title></head><body><article>"
+            + "<p>sentence of body text here </p>" * 40
+            + '<a href="/next">continue reading</a></article></body></html>')
+
+    def handler(request):
+        return httpx.Response(200, headers={"content-type": "text/html"}, text=html)
+
+    monkeypatch.setattr(fetching, "_TRANSPORT_FOR_TESTS", httpx.MockTransport(handler))
+    out = await server.web_read("http://93.184.216.34/article")
+    assert out["ok"] is True
+    assert out["title"] == "A Long Read"
+    assert out["total_length"] > 500 and "sentence of body" in out["content"]
+    assert any(l["url"].endswith("/next") for l in out["links"])
 
 
 # ── validation receipts ─────────────────────────────────────────────────
@@ -57,6 +96,30 @@ async def test_daily_art_unreachable(monkeypatch):
     monkeypatch.setattr(net, "get_json", fake_get_json)
     out = await server.daily_art()
     assert out["ok"] is False and "unreachable" in out["note"]
+
+
+async def test_apod_success_mapping(monkeypatch):
+    async def fake_get_json(url, params=None, headers=None, timeout=15.0):
+        assert params["api_key"]
+        return {"title": "T", "date": "2026-08-20", "explanation": "x" * 2000,
+                "url": "https://img.example/a.jpg", "hdurl": "https://img.example/hd.jpg",
+                "media_type": "image"}, ""
+    monkeypatch.setattr(net, "get_json", fake_get_json)
+    out = await server.apod()
+    assert out["ok"] is True and out["title"] == "T"
+    assert len(out["explanation"]) == 1200          # trimmed for receipt size
+    assert out["hdurl"].startswith("https://")
+
+
+async def test_daily_art_success_mapping(monkeypatch):
+    async def fake_get_json(url, params=None, headers=None, timeout=15.0):
+        return {"data": [{"id": 7, "title": "Water Lilies", "artist_display": "Monet",
+                          "date_display": "1906", "medium_display": "Oil",
+                          "image_id": "abc123"}]}, ""
+    monkeypatch.setattr(net, "get_json", fake_get_json)
+    out = await server.daily_art("monet")
+    assert out["ok"] is True and out["title"] == "Water Lilies"
+    assert "abc123" in out["image_url"] and out["page_url"].endswith("/7")
 
 
 # ── shelf tools ─────────────────────────────────────────────────────────

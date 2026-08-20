@@ -100,3 +100,43 @@ async def test_plain_200_passes_through():
     t = _mock({"http://93.184.216.34/": (200, {}, b"hello")})
     resp, err = await net.guarded_get("http://93.184.216.34/", transport=t)
     assert err == "" and resp.status_code == 200 and resp.content == b"hello"
+
+
+async def test_dns_pinning(monkeypatch):
+    """The connection must go to the vetted IP, with the original hostname in
+    the Host header — a second DNS answer never gets a say."""
+    async def fake_resolve(host):
+        assert host == "site.example"
+        return "", ["93.184.216.34"]
+
+    monkeypatch.setattr(net, "_resolve_guard", fake_resolve)
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["url_host"] = request.url.host
+        seen["host_header"] = request.headers.get("host")
+        return httpx.Response(200, content=b"pinned")
+
+    resp, err = await net.guarded_get("http://site.example/page",
+                                      transport=httpx.MockTransport(handler))
+    assert err == "" and resp.content == b"pinned"
+    assert seen["url_host"] == "93.184.216.34"
+    assert seen["host_header"] == "site.example"
+
+
+async def test_dns_pinning_keeps_nondefault_port(monkeypatch):
+    async def fake_resolve(host):
+        return "", ["93.184.216.34"]
+
+    monkeypatch.setattr(net, "_resolve_guard", fake_resolve)
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["host_header"] = request.headers.get("host")
+        seen["port"] = request.url.port
+        return httpx.Response(200)
+
+    resp, err = await net.guarded_get("http://site.example:8080/x",
+                                      transport=httpx.MockTransport(handler))
+    assert err == ""
+    assert seen["host_header"] == "site.example:8080" and seen["port"] == 8080

@@ -16,3 +16,10 @@ jobs:
       - run: pip install -e ".[dev]"
       - run: pytest -q
       - run: python -m engawa_mcp --check   # offline: tool registry + local almanac, no network
+      - if: runner.os == 'Linux'
+        run: |
+          pip install build
+          python -m build --wheel
+          python -m venv /tmp/wheel-venv
+          /tmp/wheel-venv/bin/pip install dist/*.whl
+          /tmp/wheel-venv/bin/engawa-mcp --check   # the published wheel + console script work

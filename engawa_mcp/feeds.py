@@ -20,6 +20,11 @@ def err(note: str, **extra) -> dict:
     return {"ok": False, "note": note, **extra}
 
 
+# Refuse to parse absurdly large "feeds" — a real feed is a few hundred KB at
+# most; anything bigger is either broken or hostile.
+FEED_MAX_BYTES = 10 * 1024 * 1024
+
+
 async def read_feed(feed_url: str, limit: int = 10) -> dict:
     """Fetch and parse one feed URL. Returns
     {ok, feed_title, entries: [{title, link, published, summary}], note}.
@@ -52,8 +57,13 @@ async def read_feed(feed_url: str, limit: int = 10) -> dict:
             return err(f"feed fetch failed: {type(e).__name__}", feed_title="", entries=[])
     if fail or resp is None:
         return err(fail or "feed fetch failed", feed_title="", entries=[])
+    if len(resp.content) > FEED_MAX_BYTES:
+        return err(f"feed too large (> {FEED_MAX_BYTES // (1024 * 1024)} MB)",
+                   feed_title="", entries=[])
     try:
-        parsed = feedparser.parse(resp.content)
+        # feedparser is synchronous; run it off the event loop so callers'
+        # timeouts (e.g. shelf discovery's budget) can actually fire.
+        parsed = await asyncio.to_thread(feedparser.parse, resp.content)
     except Exception as e:  # noqa: BLE001
         return err(f"feed parse failed: {type(e).__name__}", feed_title="", entries=[])
 

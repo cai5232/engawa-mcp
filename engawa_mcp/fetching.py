@@ -16,7 +16,7 @@ import httpx
 from bs4 import BeautifulSoup
 from readability import Document
 
-from . import config
+from . import net
 
 # A browser-ish UA for the static lane; plenty of sites serve bots a stub.
 BROWSER_HEADERS = {
@@ -32,27 +32,42 @@ BROWSER_HEADERS = {
 SPA_CONTENT_THRESHOLD = 500
 MAX_LINKS = 20
 
+# Test seam: injected into guarded_get so the static lane's redirect handling
+# is testable with httpx.MockTransport. None in production.
+_TRANSPORT_FOR_TESTS = None
+
 
 async def _fetch_static(url: str) -> tuple[str, str]:
-    """Fetch raw HTML with httpx. Returns (html, error_note); empty html = failure."""
+    """Fetch raw HTML through the guarded, DNS-pinned lane (net.guarded_get):
+    every redirect hop is vetted before it is followed. Returns
+    (html, error_note); empty html = failure."""
     try:
-        async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
-            resp = await client.get(url, headers=BROWSER_HEADERS)
-        if resp.status_code != 200:
-            return "", f"HTTP {resp.status_code}"
-        return resp.text, ""
+        resp, err = await net.guarded_get(url, timeout=20.0,
+                                          headers=BROWSER_HEADERS,
+                                          transport=_TRANSPORT_FOR_TESTS)
     except httpx.TimeoutException:
         return "", "static fetch timed out"
     except Exception as e:  # noqa: BLE001
         return "", f"static fetch failed: {type(e).__name__}"
+    if resp is None:
+        return "", err or "static fetch failed"
+    if resp.status_code != 200:
+        return "", f"HTTP {resp.status_code}"
+    return resp.text, ""
 
 
 async def _fetch_dynamic(url: str) -> tuple[str, str]:
     """Render with a headless Chromium (Playwright). Returns (html, error_note).
 
-    Uses a persistent profile under CACHE_DIR so repeat visits are cheaper.
-    The profile starts clean and nothing ever logs in through engawa, so it
-    never accumulates credentials.
+    The context is ephemeral — no profile directory, so no cookies, history,
+    or cache survive the call and "stateless" stays literally true.
+
+    Guard posture in this lane: a browser resolves DNS itself, so the HTTP
+    lane's address pin does not apply here. Instead every request the page
+    makes (navigation, redirects, subresources) passes through a per-host
+    guard check and is aborted if it targets private address space. That is
+    request filtering, not pinning — a documented residual of the optional
+    browser lane.
     """
     try:
         from playwright.async_api import async_playwright
@@ -60,18 +75,35 @@ async def _fetch_dynamic(url: str) -> tuple[str, str]:
         return "", ("dynamic rendering unavailable — install the optional "
                     "browser lane: pip install 'engawa-mcp[browser]' && "
                     "playwright install chromium")
-    profile_dir = config.CACHE_DIR / "browse-data"
-    profile_dir.mkdir(parents=True, exist_ok=True)
+    host_verdicts: dict[str, str] = {}
+
+    async def _guard_route(route):
+        try:
+            host = httpx.URL(route.request.url).host or ""
+            verdict = host_verdicts.get(host)
+            if verdict is None:
+                verdict = await net.url_public_ok(route.request.url)
+                host_verdicts[host] = verdict
+            if verdict:
+                await route.abort()
+            else:
+                await route.continue_()
+        except Exception:  # noqa: BLE001 — guard failure = don't fetch
+            try:
+                await route.abort()
+            except Exception:  # noqa: BLE001
+                pass
+
     try:
         async with async_playwright() as p:
-            ctx = await p.chromium.launch_persistent_context(
-                str(profile_dir),
-                headless=True,
-                user_agent=BROWSER_HEADERS["User-Agent"],
-                viewport={"width": 1280, "height": 900},
-            )
+            browser = await p.chromium.launch(headless=True)
             try:
+                ctx = await browser.new_context(
+                    user_agent=BROWSER_HEADERS["User-Agent"],
+                    viewport={"width": 1280, "height": 900},
+                )
                 page = await ctx.new_page()
+                await page.route("**/*", _guard_route)
                 await page.goto(url, wait_until="domcontentloaded", timeout=30000)
                 try:
                     # Give SPA scripts a beat to fill the DOM; not mandatory.
@@ -80,7 +112,7 @@ async def _fetch_dynamic(url: str) -> tuple[str, str]:
                     pass
                 return await page.content(), ""
             finally:
-                await ctx.close()
+                await browser.close()
     except Exception as e:  # noqa: BLE001
         return "", f"dynamic render failed: {type(e).__name__}: {str(e)[:120]}"
 

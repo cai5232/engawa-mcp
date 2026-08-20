@@ -99,7 +99,8 @@ An MCP server that fetches caller-supplied URLs usually runs on a machine with a
 
 - resolves every caller-supplied hostname and refuses anything that is not a **public unicast address** — loopback, RFC1918, link-local, CGNAT (100.64/10 — your Tailscale network lives here), multicast, reserved space, and NAT64 (checked explicitly, since Python's own classification of that range has shifted between versions);
 - validates **every redirect hop before following it** — following first and checking after would already have delivered the request to the internal target;
-- treats a resolve-then-connect gap (DNS rebinding TOCTOU) as a documented residual: closing it needs address pinning at the transport layer, out of scope for now.
+- **pins the vetted address for the actual connection** (HTTP lane): the request goes to the IP that passed the guard, with the original hostname kept for the Host header and TLS verification — closing the classic resolve-then-connect DNS-rebinding gap;
+- the optional browser lane cannot pin DNS (the browser resolves for itself) — there, every request the page makes, subresources included, passes a per-host guard check and is aborted if it targets private space. That is filtering, not pinning: a documented residual of the browser lane.
 
 `ENGAWA_ALLOW_PRIVATE_URLS=1` turns the guard off, for people who genuinely want to read feeds on their own LAN.
 

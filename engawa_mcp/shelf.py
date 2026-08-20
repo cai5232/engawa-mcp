@@ -12,7 +12,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
+import uuid
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -210,11 +212,17 @@ def user_load() -> tuple[dict[str, dict], str]:
 
 
 def user_save(data: dict[str, dict]) -> None:
+    """Atomic within one process (unique temp file + rename). Two server
+    processes sharing one ENGAWA_CACHE_DIR can still lose one of two
+    concurrent updates — run one instance per cache dir."""
     p = _user_path()
     p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
-    tmp.replace(p)
+    tmp = p.parent / f".shelf-{os.getpid()}-{uuid.uuid4().hex[:8]}.tmp"
+    try:
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+        tmp.replace(p)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def merged() -> tuple[dict[str, dict], str]:

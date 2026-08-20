@@ -63,20 +63,25 @@ async def web_read(url: str, offset: int = 0, length: int = 3000) -> dict:
         length: max characters returned this call (default 3000)
 
     Returns:
-        {title, content, total_length, links (≤10), note}
+        {ok, title, content, total_length, links (≤10), note}
     """
+    def _fail(note: str) -> dict:
+        return {"ok": False, "title": "", "content": "", "total_length": 0,
+                "links": [], "note": note}
+
     if re.match(r"https?://(www\.|mobile\.)?(twitter\.com|x\.com)/", url or ""):
-        return {"title": "", "content": "", "total_length": 0, "links": [],
-                "note": "x.com sits behind a login wall; engawa reads the open web only"}
+        return _fail("x.com sits behind a login wall; engawa reads the open web only")
     guard = await net.url_public_ok(url)
     if guard:
-        return {"title": "", "content": "", "total_length": 0, "links": [],
-                "note": guard}
+        return _fail(guard)
     offset = max(0, int(offset))
     length = max(200, min(int(length), 20000))
     async with _web_read_lock:
         page = await fetching.open_page(url, offset=offset, length=length)
+    if page["total_length"] == 0 and not page["content"]:
+        return _fail(page["note"] or "nothing readable at that URL")
     return {
+        "ok": True,
         "title": page["title"],
         "content": page["content"],
         "total_length": page["total_length"],
@@ -250,8 +255,8 @@ async def rss_read(feed_url: str, limit: int = 10) -> dict:
     """Read any RSS/Atom feed: latest entries as a list.
 
     The discovery half of a browse loop: spot an interesting entry, then
-    web_read its link for the full text. Also accepts shelf names (see
-    shelf_list), e.g. rss_read("aeon").
+    web_read its link for the full text. Also accepts shelf names (see the
+    shelf tool), e.g. rss_read("aeon").
 
     Args:
         feed_url: full feed URL, or a shelf name
@@ -300,7 +305,8 @@ async def apod(date: str = "") -> dict:
 
     Args:
         date: "YYYY-MM-DD"; empty = today. NASA publishes on US Eastern time,
-              so "today" is occasionally not up yet — step back a day on 404.
+              so "today" is occasionally not up yet — if you get a 404 note,
+              call again with yesterday's date.
 
     Returns:
         {ok, title, date, explanation, url, hdurl, media_type, note}
