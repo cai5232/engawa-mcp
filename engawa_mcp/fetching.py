@@ -64,12 +64,16 @@ async def _fetch_dynamic(url: str) -> tuple[str, str]:
     The context is ephemeral — no profile directory, so no cookies, history,
     or cache survive the call and "stateless" stays literally true.
 
-    Guard posture in this lane: a browser resolves DNS itself, so the HTTP
-    lane's address pin does not apply here. Instead the route handler below
-    performs every fetch itself, one redirect hop at a time, vetting each hop
-    (navigations, subresources, popups alike; service workers are blocked so
-    nothing fetches around it). That is per-hop filtering, not pinning — a
-    documented residual of the optional browser lane.
+    Guard posture in this lane: the browser never touches the network. Every
+    request the page makes (navigation, subresources, popups, workers' HTTP)
+    is intercepted and performed by the same DNS-pinned guarded_get the HTTP
+    lane uses, then fulfilled back into the renderer — so the pin, per-hop
+    redirect vetting, and size caps all apply here too. WebSockets are blocked
+    outright (a read-only article renderer has no business opening one), as
+    are non-GET requests and service workers. Known trade-off: redirects
+    collapse into the original request, so page.url stays the pre-redirect
+    URL; relative links are resolved by the extractor against the caller's
+    URL, which matches that behavior.
     """
     try:
         from playwright.async_api import async_playwright
@@ -79,33 +83,32 @@ async def _fetch_dynamic(url: str) -> tuple[str, str]:
                     "playwright install chromium")
 
     async def _guard_route(route):
-        # Playwright follows redirects without re-invoking route handlers, so
-        # continue_() would let hop 2 go anywhere. Fetch each hop ourselves
-        # with redirects off, guarding the URL before every hop.
         try:
-            cur = route.request.url
-            seen: set[str] = set()
-            for _hop in range(6):
-                if await net.url_public_ok(cur) or cur in seen:
-                    await route.abort()
-                    return
-                seen.add(cur)
-                resp = await route.fetch(url=cur, max_redirects=0)
-                if resp.status in (301, 302, 303, 307, 308):
-                    loc = (resp.headers or {}).get("location") or ""
-                    if not loc:
-                        await route.abort()
-                        return
-                    cur = str(httpx.URL(cur).join(loc))
-                    continue
-                await route.fulfill(response=resp)
+            if route.request.method != "GET":
+                await route.abort()
                 return
-            await route.abort()
+            fwd = {k: v for k, v in (route.request.headers or {}).items()
+                   if k.lower() not in ("host", "content-length", "cookie")}
+            resp, err = await net.guarded_get(route.request.url, timeout=20.0,
+                                              headers=fwd,
+                                              max_bytes=PAGE_MAX_BYTES,
+                                              transport=_TRANSPORT_FOR_TESTS)
+            if resp is None:
+                await route.abort()
+                return
+            await route.fulfill(status=resp.status_code,
+                                headers=dict(resp.headers),
+                                body=resp.content)
         except Exception:  # noqa: BLE001 — guard failure = don't fetch
             try:
                 await route.abort()
             except Exception:  # noqa: BLE001
                 pass
+
+    async def _ws_block(ws_route):
+        # Not calling connect_to_server() leaves the socket mocked — the
+        # renderer sees a WebSocket that never reaches any real host.
+        return
 
     try:
         async with async_playwright() as p:
@@ -117,6 +120,7 @@ async def _fetch_dynamic(url: str) -> tuple[str, str]:
                     service_workers="block",
                 )
                 await ctx.route("**/*", _guard_route)
+                await ctx.route_web_socket("**/*", _ws_block)
                 page = await ctx.new_page()
                 await page.goto(url, wait_until="domcontentloaded", timeout=30000)
                 try:
