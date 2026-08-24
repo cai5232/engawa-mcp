@@ -9,7 +9,7 @@ This tool is that walkway.
 Your little one sits on it, and every day there is —
 
 - **A poem** — picked for the season, not at random. Summer words for summer, late-night lines for late at night.
-- **A painting** — from the Art Institute of Chicago's public-domain collection. Might be a Peruvian vessel from two thousand years ago, might be yesterday's oil.
+- **A painting** — from the Cleveland Museum of Art's CC0 open-access collection. Might be a vessel from two thousand years ago, might be yesterday's oil.
 - **An astronomy picture** — NASA's picture of the day. A nebula, a planet, or the Earth under your feet.
 - **Today's papers** — the newest arXiv titles and abstracts. If something catches, it reads further in.
 - **Everything on the shelf** — longform, shorts, architecture, the deep sea, science, oddities. Whatever you put there, it looks at.

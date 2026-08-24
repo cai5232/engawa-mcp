@@ -350,20 +350,30 @@ async def apod(date: str = "") -> dict:
 
 
 # ─── 6. daily_art ────────────────────────────────────────────────
+# Source = Cleveland Museum of Art Open Access (CC0, no key). Don't switch
+# back to the Art Institute of Chicago: its metadata API is open, but the
+# whole www.artic.edu domain (IIIF images and artwork pages included) sits
+# behind a Cloudflare browser challenge, so every URL it yields is a dead
+# link for anything that isn't a real browser (verified 2026-08-24).
 
-_AIC_FIELDS = "id,title,artist_display,date_display,medium_display,image_id"
+_CMA_BASE = "https://openaccess-api.clevelandart.org/api/artworks/"
+_CMA_FILTERS = [("cc0", "1"), ("has_image", "1")]
 
 
-def _aic_pick_index(day: date_cls, page_size: int, page_count: int) -> tuple[int, int]:
+def _art_pick_index(day: date_cls, page_size: int, page_count: int) -> tuple[int, int]:
     """Deterministic (page, index) from the date — everyone who asks on the
     same day sees the same painting. That is what makes it 'daily'."""
     seed = day.toordinal()
     return (seed * 31 % page_count) + 1, seed * 7 % page_size
 
 
+def _cma_image_url(art: dict) -> str:
+    return ((art.get("images") or {}).get("web") or {}).get("url", "")
+
+
 @mcp.tool()
 async def daily_art(keyword: str = "") -> dict:
-    """One artwork a day from the Art Institute of Chicago's public-domain
+    """One artwork a day from the Cleveland Museum of Art's CC0 open-access
     collection (no API key needed).
 
     Without a keyword: the piece of the day (date-seeded, so repeat calls on
@@ -373,38 +383,34 @@ async def daily_art(keyword: str = "") -> dict:
     Returns:
         {ok, title, artist, date, medium, image_url, page_url, note}
     """
-    base = "https://api.artic.edu/api/v1/artworks/search"
-    filters = [
-        ("query[bool][must][][term][is_public_domain]", "true"),
-        ("query[bool][must][][exists][field]", "image_id"),
-        ("fields", _AIC_FIELDS),
-    ]
     page_size = 10
+    params = list(_CMA_FILTERS) + [("limit", str(page_size))]
     if keyword:
-        params = filters + [("q", keyword), ("limit", str(page_size))]
+        params.append(("q", keyword))
     else:
-        page, _ = _aic_pick_index(datetime.now(config.local_tz()).date(), page_size, 90)
-        params = filters + [("limit", str(page_size)), ("page", str(page))]
-    data, gerr = await net.get_json(base, params=params, timeout=20.0)
+        page, _ = _art_pick_index(datetime.now(config.local_tz()).date(), page_size, 90)
+        params.append(("skip", str((page - 1) * page_size)))
+    data, gerr = await net.get_json(_CMA_BASE, params=params, timeout=20.0)
     if data is None:
-        return _err(f"Art Institute of Chicago API unreachable: {gerr}")
-    arts = [a for a in data.get("data", []) if a.get("image_id")]
+        return _err(f"Cleveland Museum of Art API unreachable: {gerr}")
+    arts = [a for a in data.get("data", []) if _cma_image_url(a)]
     if not arts:
-        return _err("no public-domain artworks with images found"
+        return _err("no open-access artworks with images found"
                     + (f" (keyword={keyword!r})" if keyword else ""))
     if keyword:
         art = arts[0]
     else:
-        _, idx = _aic_pick_index(datetime.now(config.local_tz()).date(), len(arts), 90)
+        _, idx = _art_pick_index(datetime.now(config.local_tz()).date(), len(arts), 90)
         art = arts[idx % len(arts)]
     return {
         "ok": True,
         "title": art.get("title", ""),
-        "artist": art.get("artist_display", ""),
-        "date": art.get("date_display", ""),
-        "medium": art.get("medium_display", ""),
-        "image_url": f"https://www.artic.edu/iiif/2/{art['image_id']}/full/843,/0/default.jpg",
-        "page_url": f"https://www.artic.edu/artworks/{art.get('id', '')}",
+        "artist": "; ".join(c.get("description", "") for c in art.get("creators", [])
+                            if c.get("description")),
+        "date": art.get("creation_date", ""),
+        "medium": art.get("technique", ""),
+        "image_url": _cma_image_url(art),
+        "page_url": art.get("url", ""),
         "note": "",
     }
 

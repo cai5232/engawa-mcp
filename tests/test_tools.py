@@ -163,13 +163,42 @@ async def test_apod_success_mapping(monkeypatch):
 
 async def test_daily_art_success_mapping(monkeypatch):
     async def fake_get_json(url, params=None, headers=None, timeout=15.0):
-        return {"data": [{"id": 7, "title": "Water Lilies", "artist_display": "Monet",
-                          "date_display": "1906", "medium_display": "Oil",
-                          "image_id": "abc123"}]}, ""
+        assert "openaccess-api.clevelandart.org" in url   # not artic.edu — its URLs are bot-walled
+        return {"data": [
+            {"id": 1, "title": "No Image", "images": None},
+            {"id": 7, "title": "Water Lilies",
+             "creators": [{"description": "Claude Monet (French, 1840-1926)"}],
+             "creation_date": "1906", "technique": "oil on canvas",
+             "images": {"web": {"url": "https://openaccess-cdn.clevelandart.org/x/x_web.jpg"}},
+             "url": "https://clevelandart.org/art/1960.81"},
+        ]}, ""
     monkeypatch.setattr(net, "get_json", fake_get_json)
     out = await server.daily_art("monet")
     assert out["ok"] is True and out["title"] == "Water Lilies"
-    assert "abc123" in out["image_url"] and out["page_url"].endswith("/7")
+    assert out["artist"].startswith("Claude Monet")
+    assert out["image_url"].startswith("https://openaccess-cdn.clevelandart.org/")
+    assert out["page_url"] == "https://clevelandart.org/art/1960.81"
+    assert "artic.edu" not in (out["image_url"] + out["page_url"])
+
+
+async def test_daily_art_params_and_empty(monkeypatch):
+    seen = {}
+
+    async def fake_get_json(url, params=None, headers=None, timeout=15.0):
+        seen["url"], seen["params"] = url, params
+        return {"data": []}, ""
+
+    monkeypatch.setattr(net, "get_json", fake_get_json)
+    out = await server.daily_art()
+    p = dict(seen["params"])
+    assert seen["url"].startswith("https://openaccess-api.clevelandart.org/")
+    assert p["cc0"] == "1" and p["has_image"] == "1" and p["limit"] == "10"
+    assert "q" not in p and int(p["skip"]) % 10 == 0 and 0 <= int(p["skip"]) <= 890
+    assert out["ok"] is False and "no open-access artworks" in out["note"]
+    out = await server.daily_art("moon")
+    p = dict(seen["params"])
+    assert p.get("q") == "moon" and "skip" not in p
+    assert out["ok"] is False and "moon" in out["note"]
 
 
 # ── shelf tools ─────────────────────────────────────────────────────────
