@@ -85,7 +85,7 @@ playwright install chromium
 |---|---|
 | `web_read` | 任意 URL → 标题+干净正文+链接。长文用 `offset` 翻页 |
 | `rss_read` | 任意 RSS/Atom → 最新条目。也认书架名：`rss_read("aeon")` |
-| `shelf` | 书架目录。内置 19 家，五个 tag，全部出厂前真抓验过 |
+| `shelf` | 书架目录。内置 24 家，五个 tag，全部出厂前真抓验过 |
 | `shelf_add` | 给任意网站地址。自动找 feed，真读一次验过才上架 |
 | `shelf_suggest` | 候选架，另外 21 家验过活的。想加哪家，一句话的事 |
 | `shelf_remove` | 撤下用户层的源。内置的撤不了 |

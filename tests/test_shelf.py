@@ -14,7 +14,7 @@ def tmp_cache(tmp_path, monkeypatch):
 
 
 def test_builtin_shape():
-    assert len(shelf.BUILTIN) == 19
+    assert len(shelf.BUILTIN) == 24
     for name, e in shelf.BUILTIN.items():
         assert shelf.NAME_RE.match(name)
         assert e["url"].startswith("https://")
@@ -23,7 +23,7 @@ def test_builtin_shape():
 
 
 def test_suggest_shape():
-    assert len(shelf.SUGGEST) == 21
+    assert len(shelf.SUGGEST) == 16
     overlap = set(shelf.SUGGEST) & set(shelf.BUILTIN)
     assert not overlap
 

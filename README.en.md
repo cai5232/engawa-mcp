@@ -85,7 +85,7 @@ Without it, the static lane still reads most article pages, and pages that can't
 |---|---|
 | `web_read` | any URL → title + clean text + links; page long reads with `offset` |
 | `rss_read` | any RSS/Atom → latest entries; shelf names work too: `rss_read("aeon")` |
-| `shelf` | the shelf directory — 19 built-ins, five tags, every one verified before shipping |
+| `shelf` | the shelf directory — 24 built-ins, five tags, every one verified before shipping |
 | `shelf_add` | give any site address; the feed is discovered and read once before anything is saved |
 | `shelf_suggest` | a second ring of 21 verified sources, each one `shelf_add` away |
 | `shelf_remove` | take a user-added source down (built-ins stay) |
