@@ -157,27 +157,52 @@ def news_url(topic: str) -> str:
 
 # ── near-duplicate merging ────────────────────────────────────────────
 
-# Scripts written without spaces between words: CJK ideographs, kana,
-# hangul, Thai, Lao, Khmer, Myanmar.
-_DENSE_RE = re.compile(r"[\u0e00-\u0eff\u1000-\u109f\u1780-\u17ff\u3040-\u30ff"
-                       r"\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff]+")
-# Any other run of letters/digits (Latin incl. accents, Cyrillic, Greek,
-# Arabic, Hebrew, Devanagari ...), combining marks kept inside the word.
-_WORD_RE = re.compile(r"(?:[^\W_]|[\u0300-\u036f\u064b-\u065f\u0900-\u0963])+")
+# Scripts written without spaces between words get character bigrams:
+# Thai, Lao, Myanmar, Khmer, kana, CJK ideographs (all extension planes),
+# hangul syllables.
+_DENSE_RANGES = ((0x0E00, 0x0EFF), (0x1000, 0x109F), (0x1780, 0x17FF),
+                 (0x3040, 0x30FF), (0x3400, 0x4DBF), (0x4E00, 0x9FFF),
+                 (0xAC00, 0xD7AF), (0xF900, 0xFAFF), (0x20000, 0x3FFFF))
+
+
+def _dense(ch: str) -> bool:
+    cp = ord(ch)
+    return any(lo <= cp <= hi for lo, hi in _DENSE_RANGES)
 
 
 def tokens(text: str) -> set[str]:
-    """Words (>=3 chars) for space-separated scripts, character bigrams for
+    """Words (>=3 chars) for every other script, character bigrams for
     scripts without spaces. Letter bigrams would make every English headline
-    look alike, so the two families are tokenized differently."""
+    look alike, so the two families are tokenized differently. A word is a
+    run of Unicode letters, digits and combining marks (category L/N/M), so
+    Bengali vowel signs or Hebrew points stay inside their word."""
     t = unicodedata.normalize("NFKC", text or "").casefold()
     out: set[str] = set()
-    for run in _DENSE_RE.findall(t):
+    word: list[str] = []
+    run: list[str] = []
+
+    def flush() -> None:
+        if len(word) >= 3:
+            out.add("".join(word))
         if len(run) == 1:
-            out.add(run)
-        out.update(run[i:i + 2] for i in range(len(run) - 1))
-    rest = _DENSE_RE.sub(" ", t)
-    out.update(w for w in _WORD_RE.findall(rest) if len(w) >= 3)
+            out.add(run[0])
+        out.update(run[i] + run[i + 1] for i in range(len(run) - 1))
+        word.clear()
+        run.clear()
+
+    for ch in t:
+        cat = unicodedata.category(ch)[0]
+        if _dense(ch) and cat in "LMN":
+            if word:
+                flush()
+            run.append(ch)
+        elif cat in "LMN":
+            if run:
+                flush()
+            word.append(ch)
+        else:
+            flush()
+    flush()
     return out
 
 
@@ -215,6 +240,7 @@ def _link_site(link: str) -> str:
     try:
         u = urlparse(link or "")
         host = (u.hostname or "").lower()
+        u.port  # raises ValueError on a non-numeric or out-of-range port
     except ValueError:
         return ""
     if u.scheme.lower() not in ("http", "https") or not host:

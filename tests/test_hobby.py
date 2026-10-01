@@ -447,3 +447,71 @@ async def test_lock_is_released_after_each_write(tmp_cache, monkeypatch):
     assert (await server.hobby_add("熊猫"))["ok"]
     assert (await server.hobby_add("咖啡"))["ok"]
     assert (await server.hobby_remove("熊猫"))["ok"]
+
+
+def test_tokens_keep_combining_marks_and_extension_ideographs():
+    assert "বাংলা" in hobby.tokens("বাংলা ভাষা")             # Bengali vowel signs
+    assert "שָׁלוֹם" in hobby.tokens("שָׁלוֹם עולם")             # Hebrew points
+    ext_b = "\U00020000\U00020001\U00020002"
+    assert {ext_b[:2], ext_b[1:]} <= hobby.tokens(ext_b)       # CJK Extension B
+
+
+def test_bad_port_link_is_skipped():
+    items, skipped = hobby._items([entry("bad port", "http://example.com:bad/x"),
+                                   entry("too big", "http://example.com:99999/x"),
+                                   entry("fine", "https://example.com:8443/x")])
+    assert [i["title"] for i in items] == ["fine"] and skipped == 2
+
+
+async def test_real_lock_error_fails_fast(monkeypatch):
+    fcntl = pytest.importorskip("fcntl")
+    import errno
+    import time
+
+    def broken(fd, op):
+        raise OSError(errno.ENOLCK, "no locks available")
+    monkeypatch.setattr(fcntl, "flock", broken)
+    monkeypatch.setattr(feeds, "read_feed", fake_feeds({"bing.com": PANDA}))
+    t0 = time.monotonic()
+    out = await server.hobby_add("熊猫")
+    assert out["ok"] is False and "may not support file locks" in out["note"]
+    assert time.monotonic() - t0 < shelf.LOCK_WAIT_S
+
+
+RACE_WRITER = """
+import asyncio, sys
+from pathlib import Path
+from engawa_mcp import config, hobby, shelf
+config.CACHE_DIR = Path(sys.argv[1])
+tag = sys.argv[2]
+
+async def main():
+    for i in range(5):
+        async with shelf.transaction("hobbies", hobby.lock):
+            topics, err = hobby.load()
+            assert not err, err
+            topics.append({"topic": f"{tag}{i}", "exclude": [], "picked_by": "", "added": ""})
+            await asyncio.sleep(0.02)   # widen the read-modify-write window
+            hobby.save(topics)
+
+asyncio.run(main())
+"""
+
+
+def test_two_processes_writing_keep_both_updates(tmp_cache):
+    """Two real engawa processes interleave read-modify-write on one cache
+    dir; with the transaction lock every update survives."""
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    import engawa_mcp
+    pytest.importorskip("fcntl")
+    env = {**os.environ, "PYTHONPATH": str(Path(engawa_mcp.__file__).parents[1])}
+    procs = [subprocess.Popen([sys.executable, "-c", RACE_WRITER, str(tmp_cache), tag], env=env)
+             for tag in ("a", "b")]
+    assert all(p.wait(timeout=60) == 0 for p in procs)
+    topics, err = hobby.load()
+    assert not err
+    assert sorted(t["topic"] for t in topics) == sorted(f"{x}{i}" for x in "ab" for i in range(5))

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import json
 import logging
 import os
@@ -178,7 +179,15 @@ class WriteBlocked(Exception):
     """A write transaction could not take its cross-process lock."""
 
 
+# errno values meaning "someone else holds it" (flock: EWOULDBLOCK/EAGAIN;
+# msvcrt LK_NBLCK: EACCES/EDEADLOCK). Anything else is a real lock failure.
+_BUSY = {errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES,
+         getattr(errno, "EDEADLOCK", errno.EDEADLK), errno.EDEADLK}
+
+
 def _try_flock(fh) -> bool:
+    """True = locked, False = busy; a real lock error raises WriteBlocked
+    at once instead of waiting out LOCK_WAIT_S and blaming another process."""
     try:
         if fcntl is not None:
             fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -186,8 +195,12 @@ def _try_flock(fh) -> bool:
             fh.seek(0)
             msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
         return True
-    except OSError:
-        return False
+    except OSError as e:
+        if e.errno in _BUSY:
+            return False
+        raise WriteBlocked(f"couldn't lock the cache dir ({type(e).__name__} "
+                           f"errno={e.errno}) — its filesystem may not support "
+                           "file locks") from e
 
 
 def _unflock(fh) -> None:
