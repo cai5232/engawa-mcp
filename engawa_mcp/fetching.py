@@ -4,7 +4,7 @@ Two-lane design: httpx + readability first (covers most article pages in
 milliseconds), and if the extracted text is suspiciously short — the classic
 SPA signature — fall back to a real browser render via Playwright.
 
-Playwright is an optional extra (`pip install engawa-mcp[browser]`, then
+Playwright is an optional extra (the `[browser]` extra, see README; then
 `playwright install chromium`). Without it the static lane still works and
 SPA pages report why they came back thin.
 """
@@ -122,7 +122,8 @@ async def _fetch_dynamic(url: str) -> tuple[str, str]:
         from playwright.async_api import async_playwright
     except ImportError:
         return "", ("dynamic rendering unavailable — install the optional "
-                    "browser lane: pip install 'engawa-mcp[browser]' && "
+                    "browser lane: pip install 'engawa-mcp[browser] @ "
+                    "git+https://github.com/tsuru0805/engawa-mcp' && "
                     "playwright install chromium")
 
     # Aggregate page budget. Admission is a reservation taken *before* any

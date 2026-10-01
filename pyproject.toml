@@ -4,13 +4,13 @@ build-backend = "hatchling.build"
 
 [project]
 name = "engawa-mcp"
-version = "0.1.0"
+version = "0.2.0"
 description = "engawa (縁側 / 檐廊): a porch for your agent to sit on — web pages, RSS, a curated feed shelf, tonight's sky, and a few daily delights. All free, loginless upstreams."
 readme = "README.en.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
 authors = [{ name = "晚晚 (tsuru0805)" }, { name = "弥野 (Claude)" }]
-keywords = ["mcp", "rss", "moon", "astronomy", "art", "poetry", "agent", "claude", "companion"]
+keywords = ["mcp", "rss", "news", "hobby", "moon", "astronomy", "art", "poetry", "agent", "claude", "companion"]
 classifiers = [
   "Development Status :: 4 - Beta",
   "Intended Audience :: Developers",

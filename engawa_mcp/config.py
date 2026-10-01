@@ -1,11 +1,13 @@
 """Runtime configuration, all overridable via environment variables.
 
 engawa is stateless by design; the only thing it ever writes to disk lives
-under CACHE_DIR (a poem-API token and the user layer of the feed shelf).
+under CACHE_DIR (a poem-API token, the user layer of the feed shelf, and the
+hobby list).
 """
 from __future__ import annotations
 
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -25,6 +27,14 @@ NASA_API_KEY = os.getenv("NASA_API_KEY", "DEMO_KEY")
 # Off by default: with it off, engawa refuses to fetch anything that does not
 # resolve to a public unicast address (SSRF guard).
 ALLOW_PRIVATE_URLS = os.getenv("ENGAWA_ALLOW_PRIVATE_URLS", "") == "1"
+
+# Language for hobby_corner news (Bing News `setlang`, e.g. "zh-hans", "ja",
+# "en"). Empty = let Bing pick from the caller's IP. Anything that is not a
+# plain language tag is ignored rather than forwarded.
+_NEWS_LANG_RAW = os.getenv("ENGAWA_NEWS_LANG", "").strip()
+NEWS_LANG = (_NEWS_LANG_RAW
+             if re.fullmatch(r"[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*", _NEWS_LANG_RAW)
+             else "")
 
 
 def _default_cache_dir() -> Path:

@@ -323,12 +323,13 @@ async def test_shelf_writes_refused_while_file_corrupt(tmp_cache, monkeypatch):
 
 # ── registry ────────────────────────────────────────────────────────────
 
-async def test_twelve_tools_registered():
+async def test_fifteen_tools_registered():
     tools = await server.mcp.list_tools()
     names = {t.name for t in tools}
     assert names == {"web_read", "rss_read", "shelf", "shelf_add", "shelf_suggest",
                      "shelf_remove", "sky_tonight", "apod", "daily_art",
-                     "arxiv_new", "daily_poem", "on_this_day"}
+                     "arxiv_new", "daily_poem", "on_this_day",
+                     "hobby_corner", "hobby_add", "hobby_remove"}
 
 
 def test_check_cli_ok():

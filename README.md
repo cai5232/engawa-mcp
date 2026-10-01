@@ -34,12 +34,12 @@
 
 # 技术文档
 
-[English](README.en.md)。MCP server，Python。十二件工具，上游全部免费、免登录、不要 key。除了书架和一张诗词 token，盘上什么都不留。
+[English](README.en.md)。MCP server，Python。十五件工具，上游全部免费、免登录、不要 key。除了书架、爱好清单和一张诗词 token，盘上什么都不留。
 
 ## 装
 
 ```bash
-pip install engawa-mcp
+pip install git+https://github.com/tsuru0805/engawa-mcp
 ```
 
 Claude Code：
@@ -73,19 +73,19 @@ engawa-mcp --check
 SPA 页面要真浏览器才渲染得出来。可选，不装也行：
 
 ```bash
-pip install "engawa-mcp[browser]"
+pip install "engawa-mcp[browser] @ git+https://github.com/tsuru0805/engawa-mcp"
 playwright install chromium
 ```
 
 不装的话，静态通道照样读绝大多数文章页；读不出来时回执里会明说为什么。
 
-## 十二件工具
+## 十五件工具
 
 | 工具 | 干什么 |
 |---|---|
 | `web_read` | 任意 URL → 标题+干净正文+链接。长文用 `offset` 翻页 |
 | `rss_read` | 任意 RSS/Atom → 最新条目。也认书架名：`rss_read("aeon")` |
-| `shelf` | 书架目录。内置 24 家，五个 tag，全部出厂前真抓验过 |
+| `shelf` | 书架目录。内置 24 家，分五个 tag，全部出厂前真抓验过；第六个 tag `hobby` 出厂空着，留给你自己挑的站 |
 | `shelf_add` | 给任意网站地址。自动找 feed，真读一次验过才上架 |
 | `shelf_suggest` | 候选架，另外 21 家验过活的。想加哪家，一句话的事 |
 | `shelf_remove` | 撤下用户层的源。内置的撤不了 |
@@ -95,6 +95,9 @@ playwright install chromium
 | `arxiv_new` | 任意 arXiv 分类的新论文 |
 | `daily_poem` | 一句应景的中文古诗词，带出处全文 |
 | `on_this_day` | Wikipedia 历史上的今天 |
+| `hobby_corner` | 爱好角：用户自己的爱好的最新资讯，每个爱好几条，同一件事合并，网址直接给 `web_read` 读 |
+| `hobby_add` | 加一个爱好（任何语言）。真抓一次验过才存，回执里给抓到的样例 |
+| `hobby_remove` | 撤下一个爱好 |
 
 ## 配置
 
@@ -108,12 +111,25 @@ playwright install chromium
 | `ENGAWA_CACHE_DIR` | `~/.cache/engawa-mcp` | 唯一会写盘的地方 |
 | `ENGAWA_HOST` / `ENGAWA_PORT` | `127.0.0.1:8799` | HTTP 模式监听地址 |
 | `ENGAWA_ALLOW_PRIVATE_URLS` | 关 | 设 `1` 放行内网地址。想清楚再开 |
+| `ENGAWA_NEWS_LANG` | 空 | 爱好资讯的语言（Bing `setlang`：`zh-hans`、`ja`、`en`……）。空=Bing 按你的 IP 定 |
 
 ## 书架的两层
 
 内置层随包出厂，只读。用户层归你：`shelf_add` 吃任意网站地址——页面声明的 `<link>` 优先，常见路径兜底，找到 feed 真读一次，读通了才落盘。落盘是原子写；文件坏了按空处理、把错误亮出来，绝不静默覆盖。
 
 每条记录带一个 `picked_by` 字段：家里谁点名要的这家源。出厂全空，来历你们自己写。
+
+## 爱好角
+
+用户说一个爱好——`hobby_add("手冲咖啡")`、`hobby_add("大熊猫", exclude="债券")`——之后 `hobby_corner()` 就能看到它的最新资讯，和檐廊上别的每日小东西放在一起。
+
+- **来源。** Bing 新闻的关键词 RSS：免费、不要 key、按时间新到旧。它的链接是点击跟踪跳转，檐廊拆成出版方自己的网址，读的时候照样过守卫。
+- **同一件事只出现一次。** 媒体互相转载。标题逐词比对（有空格的文字按词，中日韩按相邻两字，爱好词本身不算），几乎一样的并进第一条，`also_reported` 记并了几条。
+- **排除词。** 关键词是字面匹配——「熊猫」也会搜到熊猫债券。排除词在本地把这些标题去掉（Bing 的 `-词` 写法它的 RSS 不认）。
+- **也能挂站。** 本来就喜欢的站，用 `shelf_add(..., tags="hobby")` 放上书架，会并进爱好角。
+- **失败按行报。** 某个来源抓不到，只在它那一行写明原因，其余照常返回。
+
+**中国大陆：** 那边 `www.bing.com` 会被转到 `cn.bing.com`，后者不出新闻 RSS；守卫通道又不走系统代理——梯子只有 TUN/全局模式才有用。`hobby_add` 抓不到就不存，回执里会写明这一条。
 
 ## 守卫
 
@@ -130,9 +146,9 @@ playwright install chromium
 
 ## 几条设计手记
 
-- **逛 ≠ 搜。** 这里刻意没有搜索工具。搜索是「把答案拿来」，檐廊是「让我看看」。
+- **逛 ≠ 搜。** 这里刻意没有搜索工具。搜索是「把答案拿来」，檐廊是「让我看看」。爱好角是订阅，不是搜索框：爱好设一次，之后来看，不是随手临时查。
 - **「每日」的意思是共享。** 同一天全家看到同一幅画。这不是限制，是功能本体。
-- **无状态。** 没有数据库，没有历史，没有会话。写盘只有书架和一张诗词 token。
+- **无状态。** 没有数据库，没有历史，没有会话。写盘只有书架、爱好清单和一张诗词 token。
 
 ## 作者
 

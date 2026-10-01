@@ -24,7 +24,9 @@ from . import config, feeds
 
 log = logging.getLogger("engawa.shelf")
 
-TAGS = ("science", "ocean", "longform", "architecture", "wonder")
+# "hobby" ships empty: sources the user tags with it also show up in
+# hobby_corner, next to the keyword topics.
+TAGS = ("science", "ocean", "longform", "architecture", "wonder", "hobby")
 
 # All entries verified 2026-08-19/20: fetched with this package's UA, parsed
 # as a valid feed, latest entry reasonably fresh. `picked_by` ships empty —
@@ -217,18 +219,21 @@ def user_load() -> tuple[dict[str, dict], str]:
     return good, err
 
 
-def user_save(data: dict[str, dict]) -> None:
+def atomic_write_json(p: Path, data) -> None:
     """Atomic within one process (unique temp file + rename). Two server
     processes sharing one ENGAWA_CACHE_DIR can still lose one of two
     concurrent updates — run one instance per cache dir."""
-    p = _user_path()
     p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.parent / f".shelf-{os.getpid()}-{uuid.uuid4().hex[:8]}.tmp"
+    tmp = p.parent / f".{p.stem}-{os.getpid()}-{uuid.uuid4().hex[:8]}.tmp"
     try:
         tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
         tmp.replace(p)
     finally:
         tmp.unlink(missing_ok=True)
+
+
+def user_save(data: dict[str, dict]) -> None:
+    atomic_write_json(_user_path(), data)
 
 
 def merged() -> tuple[dict[str, dict], str]:

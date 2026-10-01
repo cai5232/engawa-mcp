@@ -4,10 +4,11 @@ Your agent has tools for work. This is a porch for it to sit on: read a page
 or a feed, check tonight's moon, look at one painting a day. Every upstream
 is free and loginless; the only state on disk is a tiny cache. See README.
 
-Tools (12):
+Tools (15):
     web_read, rss_read,
     shelf, shelf_add, shelf_suggest, shelf_remove,
-    sky_tonight, apod, daily_art, arxiv_new, daily_poem, on_this_day
+    sky_tonight, apod, daily_art, arxiv_new, daily_poem, on_this_day,
+    hobby_corner, hobby_add, hobby_remove
 """
 from __future__ import annotations
 
@@ -23,7 +24,7 @@ import feedparser
 import httpx
 from mcp.server import MCPServer
 
-from . import config, feeds, fetching, net, shelf, sky
+from . import config, feeds, fetching, hobby, net, shelf, sky
 from .feeds import err as _err
 
 from . import __version__
@@ -34,8 +35,9 @@ mcp = MCPServer(
     name="engawa",
     version=__version__,
     instructions=("engawa: a porch for looking at the world — web pages, RSS, "
-                  "a curated feed shelf, tonight's sky, and a few daily "
-                  "delights. Public information only, no logins."),
+                  "a curated feed shelf, a hobby corner (news on topics the "
+                  "user picked), tonight's sky, and a few daily delights. "
+                  "Public information only, no logins."),
 )
 
 # The dynamic-render fallback drives one Chromium at a time; serialize so
@@ -106,7 +108,7 @@ async def shelf_list(tag: str = "") -> dict:
 
     Args:
         tag: filter to one shelf tag — science / ocean / longform /
-             architecture / wonder. Empty = everything.
+             architecture / wonder / hobby. Empty = everything.
 
     Returns:
         {ok, tags, entries: [{name, title, url, tags, note, picked_by, source}], note}
@@ -137,7 +139,8 @@ async def shelf_add(url: str, name: str = "", note: str = "", tags: str = "",
         name: shelf name (optional; lowercase letters/digits/hyphens, 2-40
               chars; empty = derived from the domain, collisions get -2)
         note: one-line description (optional)
-        tags: comma-separated, from science/ocean/longform/architecture/wonder
+        tags: comma-separated, from science/ocean/longform/architecture/wonder/hobby
+              (hobby = also shown in hobby_corner)
         picked_by: free-form provenance — who asked for this source (optional)
 
     Returns:
@@ -564,3 +567,117 @@ async def on_this_day(lang: str = "en", limit: int = 8) -> dict:
     events = [{"year": e.get("year"), "text": e.get("text", "")}
               for e in data.get("selected", [])[: max(1, min(limit, 20))]]
     return {"ok": True, "date": now.strftime("%m-%d"), "events": events, "note": ""}
+
+
+# ─── 10. the hobby corner ────────────────────────────────────────
+
+@mcp.tool()
+async def hobby_corner(topic: str = "", per_topic: int = 3) -> dict:
+    """News on the user's own hobbies: the latest few items for each topic
+    they picked (hobby_add), plus shelf sources tagged "hobby".
+
+    Keyword topics are matched by Bing News, newest first. Near-identical
+    headlines about the same story are merged (also_reported counts the
+    extras); headlines containing a topic's exclude words are dropped. Every
+    url is the publisher's own page — pass it to web_read for the full text.
+    A source that fails says why on its own row; the others still return.
+
+    Args:
+        topic: only this topic or hobby-tagged shelf name (empty = all)
+        per_topic: items per topic/source, 1-10 (default 3)
+
+    Returns:
+        {ok, hobbies: [{topic, kind: "keyword"|"site", ok, note,
+          items: [{title, url, site, published, summary, also_reported}]}], note}
+    """
+    per = max(1, min(int(per_topic or 3), hobby.PER_SOURCE_MAX))
+    return await hobby.corner(per, (topic or "").strip())
+
+
+@mcp.tool()
+async def hobby_add(topic: str, exclude: str = "", picked_by: str = "") -> dict:
+    """Add a hobby topic to the hobby corner (or update its exclude words).
+    The topic is checked with one real Bing News fetch before it is saved;
+    the receipt shows what that fetch found, so you can judge whether the
+    keyword matches what the user means.
+
+    Args:
+        topic: a keyword in any language, e.g. "sourdough", "大熊猫", "編み物"
+               (max 40 characters)
+        exclude: comma-separated words; headlines containing any of them are
+                 dropped (e.g. "债券, 基金" for 熊猫). Matched locally on the
+                 headline text. Replaces the topic's previous exclude list.
+        picked_by: free-form provenance — who asked for this topic (optional)
+
+    Returns:
+        {ok, topic, exclude, sample: [{title, site}], topics, note}
+    """
+    t, terr = hobby.clean_topic(topic)
+    if terr:
+        return _err(terr, topic=topic or "", exclude=[], sample=[], topics=[])
+    words, eerr = hobby.parse_exclude(exclude)
+    if eerr:
+        return _err(eerr, topic=t, exclude=[], sample=[], topics=[])
+    probe = await hobby.probe_topic(t)
+    if not probe["ok"]:
+        return _err(f"not added: {probe['note']}", topic=t, exclude=words,
+                    sample=[], topics=[])
+    async with hobby.lock:
+        topics, lerr = hobby.load()
+        if lerr:
+            return _err(f"not added: {lerr}", topic=t, exclude=words, sample=[], topics=[])
+        i = hobby.find(topics, t)
+        rec = {"topic": t, "exclude": words,
+               "picked_by": re.sub(r"\s+", " ", str(picked_by or "")).strip()[:hobby.PICKED_BY_MAX],
+               "added": hobby.today()}
+        if i >= 0:
+            rec["added"] = topics[i].get("added", rec["added"])
+            topics[i] = rec
+        elif len(topics) >= hobby.TOPICS_MAX:
+            return _err(f"not added: the corner holds at most {hobby.TOPICS_MAX} topics; "
+                        "hobby_remove one first", topic=t, exclude=words, sample=[],
+                        topics=[x["topic"] for x in topics])
+        else:
+            topics.append(rec)
+        try:
+            hobby.save(topics)
+        except OSError as e:
+            return _err(f"couldn't write hobbies.json ({type(e).__name__}) — "
+                        "check ENGAWA_CACHE_DIR is writable", topic=t, exclude=words,
+                        sample=[], topics=[])
+    items = [it for it in probe["items"] if not hobby.excluded(it["title"], words)]
+    sample = [{"title": it["title"], "site": it["site"]} for it in items[:5]]
+    note = "updated" if i >= 0 else "added"
+    if not sample:
+        note += "; no recent news for it right now — it stays in the corner and will show up when there is"
+    return {"ok": True, "topic": t, "exclude": words, "sample": sample,
+            "topics": [x["topic"] for x in topics], "note": note}
+
+
+@mcp.tool()
+async def hobby_remove(topic: str) -> dict:
+    """Remove a hobby topic from the hobby corner. (Hobby-tagged shelf sites
+    are removed with shelf_remove.)
+
+    Args:
+        topic: the topic as listed by hobby_corner
+
+    Returns:
+        {ok, topic, topics, note}
+    """
+    async with hobby.lock:
+        topics, lerr = hobby.load()
+        if lerr:
+            return _err(f"not removed: {lerr}", topic=topic or "", topics=[])
+        i = hobby.find(topics, topic or "")
+        if i < 0:
+            return _err(f"no hobby topic named '{topic}'", topic=topic or "",
+                        topics=[x["topic"] for x in topics])
+        gone = topics.pop(i)
+        try:
+            hobby.save(topics)
+        except OSError as e:
+            return _err(f"couldn't write hobbies.json ({type(e).__name__})",
+                        topic=gone["topic"], topics=[])
+    return {"ok": True, "topic": gone["topic"], "topics": [x["topic"] for x in topics],
+            "note": "removed"}

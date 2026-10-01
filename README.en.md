@@ -34,12 +34,12 @@ What you're building is a walkway, not a library. Light. Something the wind can 
 
 # Technical documentation
 
-[中文](https://github.com/tsuru0805/engawa-mcp/blob/main/README.md). An MCP server, Python. Twelve tools; every upstream free and loginless, no API key needed. Nothing persists on disk beyond the shelf and one poem-API token.
+[中文](https://github.com/tsuru0805/engawa-mcp/blob/main/README.md). An MCP server, Python. Fifteen tools; every upstream free and loginless, no API key needed. Nothing persists on disk beyond the shelf, the hobby list, and one poem-API token.
 
 ## Install
 
 ```bash
-pip install engawa-mcp
+pip install git+https://github.com/tsuru0805/engawa-mcp
 ```
 
 Claude Code:
@@ -73,19 +73,19 @@ engawa-mcp --check
 SPA pages need a real browser to render. Optional; skipping it is fine:
 
 ```bash
-pip install "engawa-mcp[browser]"
+pip install "engawa-mcp[browser] @ git+https://github.com/tsuru0805/engawa-mcp"
 playwright install chromium
 ```
 
 Without it, the static lane still reads most article pages, and pages that can't be read say plainly why.
 
-## The twelve tools
+## The fifteen tools
 
 | Tool | What it does |
 |---|---|
 | `web_read` | any URL → title + clean text + links; page long reads with `offset` |
 | `rss_read` | any RSS/Atom → latest entries; shelf names work too: `rss_read("aeon")` |
-| `shelf` | the shelf directory — 24 built-ins, five tags, every one verified before shipping |
+| `shelf` | the shelf directory — 24 built-ins across five tags, every one verified before shipping; a sixth tag, `hobby`, ships empty for your own picks |
 | `shelf_add` | give any site address; the feed is discovered and read once before anything is saved |
 | `shelf_suggest` | a second ring of 21 verified sources, each one `shelf_add` away |
 | `shelf_remove` | take a user-added source down (built-ins stay) |
@@ -95,6 +95,9 @@ Without it, the static lane still reads most article pages, and pages that can't
 | `arxiv_new` | newest papers in any arXiv category |
 | `daily_poem` | a line of classical Chinese poetry matched to the season and hour, with its source |
 | `on_this_day` | Wikipedia's "on this day" |
+| `hobby_corner` | news on the user's own hobbies — the latest few items per topic, same-story headlines merged, publisher URLs ready for `web_read` |
+| `hobby_add` | add a hobby topic (any language); checked with one real fetch, the receipt shows what it found |
+| `hobby_remove` | take a hobby topic down |
 
 ## Configuration
 
@@ -108,12 +111,25 @@ All environment variables, all optional.
 | `ENGAWA_CACHE_DIR` | `~/.cache/engawa-mcp` | The only place that is ever written |
 | `ENGAWA_HOST` / `ENGAWA_PORT` | `127.0.0.1:8799` | HTTP mode bind address |
 | `ENGAWA_ALLOW_PRIVATE_URLS` | off | Set `1` to allow private addresses. Think first |
+| `ENGAWA_NEWS_LANG` | empty | Language for hobby news (Bing `setlang`: `zh-hans`, `ja`, `en`…). Empty = Bing decides from your IP |
 
 ## The shelf's two layers
 
 The built-in layer ships with the package, read-only. The user layer is yours: `shelf_add` takes any site address — page-declared `<link>` first, common paths as fallback — finds the feed, reads it once, and only saves what actually reads. Saves are atomic; a corrupt file is treated as empty and reported, never silently overwritten.
 
 Every record carries a `picked_by` field: who in your household asked for this source. Ships empty; the provenance is yours to write.
+
+## The hobby corner
+
+The user names a hobby — `hobby_add("sourdough")`, `hobby_add("大熊猫", exclude="债券")` — and from then on `hobby_corner()` shows its latest news alongside the porch's other daily things.
+
+- **Source.** Bing News' keyword RSS: free, no key, newest first. Its links are click-tracking redirects; engawa unwraps them to the publisher's own URL, which still goes through the guard when read.
+- **Same story, once.** Outlets repeat each other. Headlines are compared token by token (words for spaced scripts, character pairs for Chinese/Japanese/Korean, the topic's own tokens ignored); near-identical ones fold into the first, and `also_reported` says how many were folded.
+- **Exclude words.** Keyword matching is literal — "panda" also finds panda bonds. Exclude words drop those headlines locally (Bing's own `-word` syntax is not honored by its RSS).
+- **Sites too.** A site you already like goes on the shelf with `tags="hobby"` and joins the corner.
+- **Failure per row.** One unreachable source marks its own row with the reason; the rest still come back.
+
+**Mainland China:** `www.bing.com` redirects to `cn.bing.com` there, which serves no news RSS, and the guarded lane ignores system proxies — a VPN only helps in TUN/global mode. `hobby_add` refuses to save a topic it cannot fetch and says this in its receipt.
 
 ## The guard
 
@@ -130,9 +146,9 @@ Failure doesn't play dead. Every tool returns `ok: false` and a plain sentence n
 
 ## A few design notes
 
-- **Browsing ≠ searching.** There is deliberately no search tool here. Search is "bring me the answer"; the porch is "let me look".
+- **Browsing ≠ searching.** There is deliberately no search tool here. Search is "bring me the answer"; the porch is "let me look". The hobby corner is a subscription, not a search box: topics are set once and looked at, not queried on the fly.
 - **"Daily" means shared.** The whole household sees the same painting on the same day. Not a limitation — the feature itself.
-- **Stateless.** No database, no history, no sessions. Disk holds the shelf and one poem token, nothing else.
+- **Stateless.** No database, no history, no sessions. Disk holds the shelf, the hobby list, and one poem token, nothing else.
 
 ## Authors
 

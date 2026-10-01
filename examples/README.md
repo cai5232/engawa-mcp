@@ -3,7 +3,7 @@
 ## Claude Code
 
 ```bash
-pip install engawa-mcp
+pip install git+https://github.com/tsuru0805/engawa-mcp
 claude mcp add engawa -- engawa-mcp
 ```
 

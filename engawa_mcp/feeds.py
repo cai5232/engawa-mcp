@@ -7,6 +7,7 @@ cannot actually read).
 from __future__ import annotations
 
 import asyncio
+from urllib.parse import parse_qs, urlparse
 
 import feedparser
 import httpx
@@ -23,6 +24,26 @@ def err(note: str, **extra) -> dict:
 # Refuse to parse absurdly large "feeds" — a real feed is a few hundred KB at
 # most; anything bigger is either broken or hostile.
 FEED_MAX_BYTES = 10 * 1024 * 1024
+
+
+_BING_HOSTS = {"bing.com", "www.bing.com", "cn.bing.com"}
+
+
+def unwrap_link(link: str) -> str:
+    """Bing News feed links are click-tracking redirects
+    (bing.com/news/apiclick.aspx?...&url=<publisher url>). Return the
+    publisher's own address so web_read reads the article, not the tracker.
+    Anything else — or a wrapper whose target is not http(s) — passes through
+    unchanged. The unwrapped URL is still subject to the SSRF guard when read."""
+    try:
+        u = urlparse(link)
+    except ValueError:
+        return link
+    if (u.hostname or "").lower() in _BING_HOSTS and u.path.lower() == "/news/apiclick.aspx":
+        target = (parse_qs(u.query).get("url") or [""])[0].strip()
+        if target.lower().startswith(("http://", "https://")):
+            return target
+    return link
 
 
 async def read_feed(feed_url: str, limit: int = 10) -> dict:
@@ -78,7 +99,7 @@ async def read_feed(feed_url: str, limit: int = 10) -> dict:
     for e in parsed.entries[: max(1, min(limit, 30))]:
         entries.append({
             "title": net.strip_html(e.get("title", ""), 200),
-            "link": e.get("link", ""),
+            "link": unwrap_link(e.get("link", "")),
             "published": e.get("published", e.get("updated", "")),
             "summary": net.strip_html(e.get("summary", ""), 400),
         })

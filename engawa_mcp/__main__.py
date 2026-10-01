@@ -30,7 +30,7 @@ def _check() -> int:
     print(f"sky check ({today}, lat={config.LAT} lon={config.LON}): "
           f"{almanac['moon_phase']} {almanac['moon_illumination']}, "
           f"sunset {almanac['sunset']}")
-    return 0 if len(names) == 12 else 1
+    return 0 if len(names) == 15 else 1
 
 
 def main(argv: list[str] | None = None) -> int:
