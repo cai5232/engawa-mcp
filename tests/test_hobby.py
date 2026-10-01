@@ -114,7 +114,7 @@ def test_news_url_language(monkeypatch):
 # ── story merging ─────────────────────────────────────────────────────
 
 def test_merge_same_story_cjk():
-    items = hobby._items(PANDA)
+    items, _ = hobby._items(PANDA)
     out = hobby.merge_duplicates(items, "熊猫")
     titles = [i["title"] for i in out]
     assert len(out) == 4
@@ -124,7 +124,7 @@ def test_merge_same_story_cjk():
 
 
 def test_merge_keeps_distinct_english_stories():
-    items = hobby._items([
+    items, _ = hobby._items([
         entry("A Fifth-Generation Baker is Bringing Sourdough Bagels to Park Slope", "https://a.example/1"),
         entry("Is sourdough bread healthier than whole wheat? Dietitians weigh in", "https://b.example/2"),
         entry("This quick water test checks sourdough starter", "https://c.example/3"),
@@ -206,11 +206,18 @@ async def test_writes_refused_while_file_corrupt(tmp_cache, monkeypatch):
     assert (tmp_cache / "hobbies.json").read_text(encoding="utf-8") == "{broken"
 
 
-async def test_invalid_records_block_writes_but_are_reported(tmp_cache):
-    (tmp_cache / "hobbies.json").write_text(json.dumps(
-        {"topics": [{"topic": "ok", "exclude": []}, {"topic": "", "exclude": []}]}))
+async def test_invalid_records_block_writes_but_are_reported(tmp_cache, monkeypatch):
+    raw = json.dumps({"topics": [{"topic": "ok", "exclude": []},
+                                 {"topic": "", "exclude": []}]})
+    (tmp_cache / "hobbies.json").write_text(raw, encoding="utf-8")
     topics, err = hobby.load()
     assert [t["topic"] for t in topics] == ["ok"] and "skipped 1" in err
+    monkeypatch.setattr(feeds, "read_feed", fake_feeds({"bing.com": PANDA}))
+    out = await server.hobby_add("熊猫")
+    assert out["ok"] is False and "skipped 1" in out["note"]
+    out = await server.hobby_remove("ok")
+    assert out["ok"] is False and "skipped 1" in out["note"]
+    assert (tmp_cache / "hobbies.json").read_text(encoding="utf-8") == raw
 
 
 async def test_remove(tmp_cache, monkeypatch):
@@ -292,12 +299,19 @@ async def test_corner_budget_marks_slow_rows(monkeypatch):
     monkeypatch.setattr(feeds, "read_feed", fake_feeds({"bing.com": PANDA}))
     await server.hobby_add("熊猫")
 
+    cancelled = []
+
     async def slow(url, limit=10):
-        await asyncio.sleep(5)
+        try:
+            await asyncio.sleep(5)
+        except asyncio.CancelledError:
+            cancelled.append(url)
+            raise
     monkeypatch.setattr(feeds, "read_feed", slow)
     monkeypatch.setattr(hobby, "CORNER_BUDGET_S", 0.05)
     out = await server.hobby_corner()
     assert out["ok"] is False and "not fetched within" in out["hobbies"][0]["note"]
+    assert len(cancelled) == 1        # the straggler was stopped before returning
 
 
 async def test_shelf_add_accepts_hobby_tag(monkeypatch):
@@ -308,3 +322,128 @@ async def test_shelf_add_accepts_hobby_tag(monkeypatch):
     assert out["ok"] is True
     listed = await server.shelf_list(tag="hobby")
     assert [e["name"] for e in listed["entries"]] == [out["name"]]
+
+
+async def test_corner_unreadable_list_is_not_ok(tmp_cache):
+    (tmp_cache / "hobbies.json").write_text("{broken", encoding="utf-8")
+    out = await server.hobby_corner()
+    assert out["ok"] is False and out["hobbies"] == [] and "corrupt" in out["note"]
+
+
+# ── unusable links are reported, never silent ─────────────────────────
+
+BAD_LINKS = [
+    entry("no link at all", ""),
+    entry("ftp link", "ftp://files.example/a"),
+    entry("broken ipv6 host", "http://[broken/x"),
+    entry("tracker left wrapped", "http://www.bing.com/news/apiclick.aspx?url=javascript%3a1"),
+    entry("good one", "https://pub.example/ok"),
+]
+
+
+async def test_corner_reports_skipped_links(monkeypatch):
+    monkeypatch.setattr(feeds, "read_feed", fake_feeds({"bing.com": PANDA}))
+    await server.hobby_add("熊猫")
+    monkeypatch.setattr(feeds, "read_feed", fake_feeds({"bing.com": BAD_LINKS}))
+    row = (await server.hobby_corner(per_topic=10))["hobbies"][0]
+    assert row["ok"] and [i["title"] for i in row["items"]] == ["good one"]
+    assert "4 item(s) skipped" in row["note"]
+
+
+async def test_add_reports_skipped_links_without_crashing(monkeypatch):
+    monkeypatch.setattr(feeds, "read_feed", fake_feeds({"bing.com": BAD_LINKS}))
+    out = await server.hobby_add("whatever")
+    assert out["ok"] is True and [x["title"] for x in out["sample"]] == ["good one"]
+    assert "4 item(s) skipped" in out["note"]
+
+
+async def test_site_row_reports_skipped_links(monkeypatch):
+    shelf.user_save({"soapblog": {"url": "https://soap.example/feed", "tags": ["hobby"],
+                                  "title": "Soap Blog", "note": "", "picked_by": ""}})
+    monkeypatch.setattr(feeds, "read_feed", fake_feeds({"soap.example": BAD_LINKS[:2]}))
+    row = (await server.hobby_corner())["hobbies"][0]
+    assert row["ok"] and row["items"] == []
+    assert "2 item(s) skipped" in row["note"] and "no usable entries" in row["note"]
+
+
+# ── tokenizer across scripts ──────────────────────────────────────────
+
+def test_tokens_unicode_words_and_dense_scripts():
+    assert {"панды", "зоопарк"} <= hobby.tokens("Панды вернулись в зоопарк")
+    assert {"café", "brûlée"} <= hobby.tokens("Café brûlée")
+    assert {"大熊", "熊猫"} <= hobby.tokens("大熊猫")
+    assert "sourdough" in hobby.tokens("大熊猫 sourdough")
+    assert hobby.tokens("แพนด้า")          # Thai is not lost
+
+
+def test_merge_cyrillic_same_story():
+    items, _ = hobby._items([
+        entry("Панды Жу Ли и Дин Дин вернулись в вольер московского зоопарка", "https://a.example/1"),
+        entry("В московском зоопарке панды Жу Ли и Дин Дин вернулись в вольер", "https://b.example/2"),
+        entry("Новый детёныш панды родился в Китае", "https://c.example/3"),
+    ])
+    out = hobby.merge_duplicates(items, "панды")
+    assert len(out) == 2 and out[0]["also_reported"] == 1
+
+
+def test_threshold_boundary():
+    a = {"t1", "t2", "t3", "t4", "t5"}
+    assert hobby.same_story(a, {"t1", "t2", "x1", "x2", "x3"})        # 2/5 = 0.4
+    assert not hobby.same_story(a, {"t1", "x1", "x2", "x3", "x4"})    # 1/5
+    assert not hobby.same_story(set(), a)
+
+
+# ── cross-process write lock ──────────────────────────────────────────
+
+HOLD_LOCK = """
+import fcntl, sys, time
+fh = open(sys.argv[1], "a+b")
+fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+print("held", flush=True)
+time.sleep(30)
+"""
+
+
+@pytest.fixture
+def lock_held_elsewhere(tmp_cache):
+    """Another OS process holds the lock files, like a second engawa server."""
+    import subprocess
+    import sys
+    pytest.importorskip("fcntl")
+    procs = []
+    for stem in ("hobbies", "shelf"):
+        p = subprocess.Popen([sys.executable, "-c", HOLD_LOCK, str(tmp_cache / f".{stem}.lock")],
+                             stdout=subprocess.PIPE, text=True)
+        assert p.stdout.readline().strip() == "held"
+        procs.append(p)
+    yield
+    for p in procs:
+        p.kill()
+        p.wait()
+
+
+async def test_writes_wait_for_another_process_then_refuse(lock_held_elsewhere, tmp_cache,
+                                                           monkeypatch):
+    monkeypatch.setattr(shelf, "LOCK_WAIT_S", 0.2)
+    monkeypatch.setattr(feeds, "read_feed", fake_feeds({"bing.com": PANDA}))
+    out = await server.hobby_add("熊猫")
+    assert out["ok"] is False and "another engawa process" in out["note"]
+    assert not (tmp_cache / "hobbies.json").exists()
+    out = await server.hobby_remove("熊猫")
+    assert out["ok"] is False and "another engawa process" in out["note"]
+
+    async def disc(url):
+        return "https://soap.example/feed", {"ok": True, "feed_title": "Soap"}, ""
+    monkeypatch.setattr(shelf, "discover_feed", disc)
+    out = await server.shelf_add(url="https://soap.example")
+    assert out["ok"] is False and "another engawa process" in out["note"]
+    out = await server.shelf_remove("anything")
+    assert out["ok"] is False and "another engawa process" in out["note"]
+
+
+async def test_lock_is_released_after_each_write(tmp_cache, monkeypatch):
+    monkeypatch.setattr(shelf, "LOCK_WAIT_S", 0.2)
+    monkeypatch.setattr(feeds, "read_feed", fake_feeds({"bing.com": PANDA}))
+    assert (await server.hobby_add("熊猫"))["ok"]
+    assert (await server.hobby_add("咖啡"))["ok"]
+    assert (await server.hobby_remove("熊猫"))["ok"]

@@ -17,9 +17,9 @@ from urllib.parse import urlparse
 import httpx
 from bs4 import BeautifulSoup
 
-from . import config
+from . import __version__, config
 
-UA = {"User-Agent": "engawa-mcp/0.1 (https://github.com/tsuru0805/engawa-mcp)"}
+UA = {"User-Agent": f"engawa-mcp/{__version__} (https://github.com/tsuru0805/engawa-mcp)"}
 
 _MAX_HOPS = 5
 

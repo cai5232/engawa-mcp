@@ -26,7 +26,7 @@ def err(note: str, **extra) -> dict:
 FEED_MAX_BYTES = 10 * 1024 * 1024
 
 
-_BING_HOSTS = {"bing.com", "www.bing.com", "cn.bing.com"}
+BING_HOSTS = {"bing.com", "www.bing.com", "cn.bing.com"}
 
 
 def unwrap_link(link: str) -> str:
@@ -39,7 +39,7 @@ def unwrap_link(link: str) -> str:
         u = urlparse(link)
     except ValueError:
         return link
-    if (u.hostname or "").lower() in _BING_HOSTS and u.path.lower() == "/news/apiclick.aspx":
+    if (u.hostname or "").lower() in BING_HOSTS and u.path.lower() == "/news/apiclick.aspx":
         target = (parse_qs(u.query).get("url") or [""])[0].strip()
         if target.lower().startswith(("http://", "https://")):
             return target

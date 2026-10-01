@@ -169,38 +169,41 @@ async def shelf_add(url: str, name: str = "", note: str = "", tags: str = "",
     feed_url, probe, derr = await shelf.discover_feed(url)
     if not feed_url or probe is None:
         return _err(f"not added: {derr}", name=name, feed_title="", feed_url="")
-    async with shelf.lock:
-        user, lerr = shelf.user_load()
-        if lerr:  # refuse writes while the file is unhealthy — saving would drop records
-            return _err(f"not added: {lerr}", name=name, feed_title="", feed_url=feed_url)
-        # Same-feed dedup regardless of layer or whether a name was given.
-        nf = shelf.norm_feed_url(feed_url)
-        hit_builtin = next((k for k, v in shelf.BUILTIN.items()
-                            if shelf.norm_feed_url(v["url"]) == nf), None)
-        if hit_builtin:
-            return _err(f"already on the built-in shelf as '{hit_builtin}'",
-                        name=hit_builtin, feed_title=probe.get("feed_title", ""),
-                        feed_url=feed_url)
-        same_user = next((k for k, v in user.items()
-                          if shelf.norm_feed_url(v.get("url", "")) == nf), None)
-        if same_user and name and name != same_user:
-            return _err(f"already on the shelf as '{same_user}'; use that name to update",
-                        name=same_user, feed_title=probe.get("feed_title", ""),
-                        feed_url=feed_url)
-        if not name:
-            # Derive from the address the caller gave, not the feed host — a
-            # site served through FeedBurner should not be named "feedburner".
-            name = same_user or shelf.auto_name(url, set(user) | set(shelf.BUILTIN))
-        existed = name in user
-        user[name] = {"title": probe.get("feed_title") or name, "url": feed_url,
-                      "tags": tag_list, "note": (note or "")[:200],
-                      "picked_by": re.sub(r"\s+", " ", str(picked_by or "")).strip()[:shelf.PICKED_BY_MAX]}
-        try:
-            shelf.user_save(user)
-        except OSError as e:
-            return _err(f"couldn't write the shelf ({type(e).__name__}) — "
-                        "check ENGAWA_CACHE_DIR is writable",
-                        name=name, feed_title="", feed_url=feed_url)
+    try:
+        async with shelf.transaction("shelf", shelf.lock):
+            user, lerr = shelf.user_load()
+            if lerr:  # refuse writes while the file is unhealthy — saving would drop records
+                return _err(f"not added: {lerr}", name=name, feed_title="", feed_url=feed_url)
+            # Same-feed dedup regardless of layer or whether a name was given.
+            nf = shelf.norm_feed_url(feed_url)
+            hit_builtin = next((k for k, v in shelf.BUILTIN.items()
+                                if shelf.norm_feed_url(v["url"]) == nf), None)
+            if hit_builtin:
+                return _err(f"already on the built-in shelf as '{hit_builtin}'",
+                            name=hit_builtin, feed_title=probe.get("feed_title", ""),
+                            feed_url=feed_url)
+            same_user = next((k for k, v in user.items()
+                              if shelf.norm_feed_url(v.get("url", "")) == nf), None)
+            if same_user and name and name != same_user:
+                return _err(f"already on the shelf as '{same_user}'; use that name to update",
+                            name=same_user, feed_title=probe.get("feed_title", ""),
+                            feed_url=feed_url)
+            if not name:
+                # Derive from the address the caller gave, not the feed host — a
+                # site served through FeedBurner should not be named "feedburner".
+                name = same_user or shelf.auto_name(url, set(user) | set(shelf.BUILTIN))
+            existed = name in user
+            user[name] = {"title": probe.get("feed_title") or name, "url": feed_url,
+                          "tags": tag_list, "note": (note or "")[:200],
+                          "picked_by": re.sub(r"\s+", " ", str(picked_by or "")).strip()[:shelf.PICKED_BY_MAX]}
+            try:
+                shelf.user_save(user)
+            except OSError as e:
+                return _err(f"couldn't write the shelf ({type(e).__name__}) — "
+                            "check ENGAWA_CACHE_DIR is writable",
+                            name=name, feed_title="", feed_url=feed_url)
+    except shelf.WriteBlocked as e:
+        return _err(f"not added: {e}", name=name, feed_title="", feed_url=feed_url)
     return {"ok": True, "name": name, "feed_title": probe.get("feed_title", ""),
             "feed_url": feed_url, "note": "updated" if existed else "added"}
 
@@ -247,18 +250,21 @@ async def shelf_remove(name: str) -> dict:
         {ok, name, note}
     """
     name = (name or "").strip().lower()
-    async with shelf.lock:
-        user, lerr = shelf.user_load()
-        if lerr:  # same rule as shelf_add: no writes while the file is unhealthy
-            return _err(f"not removed: {lerr}", name=name)
-        if name in user:  # user layer first: shadowed hand-edited records stay removable
-            del user[name]
-            try:
-                shelf.user_save(user)
-            except OSError as e:
-                return _err(f"couldn't write the shelf ({type(e).__name__}) — "
-                            "check ENGAWA_CACHE_DIR is writable", name=name)
-            return {"ok": True, "name": name, "note": "removed"}
+    try:
+        async with shelf.transaction("shelf", shelf.lock):
+            user, lerr = shelf.user_load()
+            if lerr:  # same rule as shelf_add: no writes while the file is unhealthy
+                return _err(f"not removed: {lerr}", name=name)
+            if name in user:  # user layer first: shadowed hand-edited records stay removable
+                del user[name]
+                try:
+                    shelf.user_save(user)
+                except OSError as e:
+                    return _err(f"couldn't write the shelf ({type(e).__name__}) — "
+                                "check ENGAWA_CACHE_DIR is writable", name=name)
+                return {"ok": True, "name": name, "note": "removed"}
+    except shelf.WriteBlocked as e:
+        return _err(f"not removed: {e}", name=name)
     if name in shelf.BUILTIN:
         return _err(f"'{name}' is built-in and cannot be removed", name=name)
     return _err(f"nothing on the shelf named '{name}'", name=name)
@@ -622,34 +628,39 @@ async def hobby_add(topic: str, exclude: str = "", picked_by: str = "") -> dict:
     if not probe["ok"]:
         return _err(f"not added: {probe['note']}", topic=t, exclude=words,
                     sample=[], topics=[])
-    async with hobby.lock:
-        topics, lerr = hobby.load()
-        if lerr:
-            return _err(f"not added: {lerr}", topic=t, exclude=words, sample=[], topics=[])
-        i = hobby.find(topics, t)
-        rec = {"topic": t, "exclude": words,
-               "picked_by": re.sub(r"\s+", " ", str(picked_by or "")).strip()[:hobby.PICKED_BY_MAX],
-               "added": hobby.today()}
-        if i >= 0:
-            rec["added"] = topics[i].get("added", rec["added"])
-            topics[i] = rec
-        elif len(topics) >= hobby.TOPICS_MAX:
-            return _err(f"not added: the corner holds at most {hobby.TOPICS_MAX} topics; "
-                        "hobby_remove one first", topic=t, exclude=words, sample=[],
-                        topics=[x["topic"] for x in topics])
-        else:
-            topics.append(rec)
-        try:
-            hobby.save(topics)
-        except OSError as e:
-            return _err(f"couldn't write hobbies.json ({type(e).__name__}) — "
-                        "check ENGAWA_CACHE_DIR is writable", topic=t, exclude=words,
-                        sample=[], topics=[])
+    try:
+        async with shelf.transaction("hobbies", hobby.lock):
+            topics, lerr = hobby.load()
+            if lerr:
+                return _err(f"not added: {lerr}", topic=t, exclude=words, sample=[], topics=[])
+            i = hobby.find(topics, t)
+            rec = {"topic": t, "exclude": words,
+                   "picked_by": re.sub(r"\s+", " ", str(picked_by or "")).strip()[:hobby.PICKED_BY_MAX],
+                   "added": hobby.today()}
+            if i >= 0:
+                rec["added"] = topics[i].get("added", rec["added"])
+                topics[i] = rec
+            elif len(topics) >= hobby.TOPICS_MAX:
+                return _err(f"not added: the corner holds at most {hobby.TOPICS_MAX} topics; "
+                            "hobby_remove one first", topic=t, exclude=words, sample=[],
+                            topics=[x["topic"] for x in topics])
+            else:
+                topics.append(rec)
+            try:
+                hobby.save(topics)
+            except OSError as e:
+                return _err(f"couldn't write hobbies.json ({type(e).__name__}) — "
+                            "check ENGAWA_CACHE_DIR is writable", topic=t, exclude=words,
+                            sample=[], topics=[])
+    except shelf.WriteBlocked as e:
+        return _err(f"not added: {e}", topic=t, exclude=words, sample=[], topics=[])
     items = [it for it in probe["items"] if not hobby.excluded(it["title"], words)]
     sample = [{"title": it["title"], "site": it["site"]} for it in items[:5]]
     note = "updated" if i >= 0 else "added"
     if not sample:
         note += "; no recent news for it right now — it stays in the corner and will show up when there is"
+    if probe.get("note"):
+        note += f"; {probe['note']}"
     return {"ok": True, "topic": t, "exclude": words, "sample": sample,
             "topics": [x["topic"] for x in topics], "note": note}
 
@@ -665,19 +676,22 @@ async def hobby_remove(topic: str) -> dict:
     Returns:
         {ok, topic, topics, note}
     """
-    async with hobby.lock:
-        topics, lerr = hobby.load()
-        if lerr:
-            return _err(f"not removed: {lerr}", topic=topic or "", topics=[])
-        i = hobby.find(topics, topic or "")
-        if i < 0:
-            return _err(f"no hobby topic named '{topic}'", topic=topic or "",
-                        topics=[x["topic"] for x in topics])
-        gone = topics.pop(i)
-        try:
-            hobby.save(topics)
-        except OSError as e:
-            return _err(f"couldn't write hobbies.json ({type(e).__name__})",
-                        topic=gone["topic"], topics=[])
+    try:
+        async with shelf.transaction("hobbies", hobby.lock):
+            topics, lerr = hobby.load()
+            if lerr:
+                return _err(f"not removed: {lerr}", topic=topic or "", topics=[])
+            i = hobby.find(topics, topic or "")
+            if i < 0:
+                return _err(f"no hobby topic named '{topic}'", topic=topic or "",
+                            topics=[x["topic"] for x in topics])
+            gone = topics.pop(i)
+            try:
+                hobby.save(topics)
+            except OSError as e:
+                return _err(f"couldn't write hobbies.json ({type(e).__name__})",
+                            topic=gone["topic"], topics=[])
+    except shelf.WriteBlocked as e:
+        return _err(f"not removed: {e}", topic=topic or "", topics=[])
     return {"ok": True, "topic": gone["topic"], "topics": [x["topic"] for x in topics],
             "note": "removed"}

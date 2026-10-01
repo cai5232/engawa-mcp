@@ -157,21 +157,27 @@ def news_url(topic: str) -> str:
 
 # ── near-duplicate merging ────────────────────────────────────────────
 
-_WORD_RE = re.compile(r"[a-z0-9]+")
-# CJK ideographs, kana, hangul — scripts without spaces between words.
-_DENSE_RE = re.compile(r"[぀-ヿ㐀-䶿一-鿿가-힯豈-﫿]+")
+# Scripts written without spaces between words: CJK ideographs, kana,
+# hangul, Thai, Lao, Khmer, Myanmar.
+_DENSE_RE = re.compile(r"[\u0e00-\u0eff\u1000-\u109f\u1780-\u17ff\u3040-\u30ff"
+                       r"\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff]+")
+# Any other run of letters/digits (Latin incl. accents, Cyrillic, Greek,
+# Arabic, Hebrew, Devanagari ...), combining marks kept inside the word.
+_WORD_RE = re.compile(r"(?:[^\W_]|[\u0300-\u036f\u064b-\u065f\u0900-\u0963])+")
 
 
 def tokens(text: str) -> set[str]:
-    """Words (≥3 chars) for space-separated scripts, character bigrams for
-    CJK/kana/hangul runs. Letter bigrams would make every English headline
+    """Words (>=3 chars) for space-separated scripts, character bigrams for
+    scripts without spaces. Letter bigrams would make every English headline
     look alike, so the two families are tokenized differently."""
     t = unicodedata.normalize("NFKC", text or "").casefold()
-    out = {w for w in _WORD_RE.findall(t) if len(w) >= 3}
+    out: set[str] = set()
     for run in _DENSE_RE.findall(t):
         if len(run) == 1:
             out.add(run)
         out.update(run[i:i + 2] for i in range(len(run) - 1))
+    rest = _DENSE_RE.sub(" ", t)
+    out.update(w for w in _WORD_RE.findall(rest) if len(w) >= 3)
     return out
 
 
@@ -202,21 +208,41 @@ def excluded(title: str, words: list[str]) -> bool:
     return any(key(w) in t for w in words)
 
 
-def _site(url: str) -> str:
-    host = (urlparse(url).hostname or "").lower()
+def _link_site(link: str) -> str:
+    """The display site for an item link, or "" if the link is unusable:
+    missing, not http(s), unparsable, or a Bing redirect that could not be
+    unwrapped (it would not be the publisher's page)."""
+    try:
+        u = urlparse(link or "")
+        host = (u.hostname or "").lower()
+    except ValueError:
+        return ""
+    if u.scheme.lower() not in ("http", "https") or not host:
+        return ""
+    if host in feeds.BING_HOSTS and u.path.lower() == "/news/apiclick.aspx":
+        return ""  # read_feed already unwrapped every wrapper it could
     return host[4:] if host.startswith("www.") else host
 
 
-def _items(entries: list[dict]) -> list[dict]:
-    out = []
+def _items(entries: list[dict]) -> tuple[list[dict], int]:
+    """Feed entries -> corner items. Returns (items, skipped); skipped counts
+    entries dropped for an unusable link and is always reported."""
+    out, skipped = [], 0
     for e in entries:
         link = e.get("link", "")
-        if not link:
+        site = _link_site(link)
+        if not site:
+            skipped += 1
             continue
-        out.append({"title": e.get("title", ""), "url": link, "site": _site(link),
+        out.append({"title": e.get("title", ""), "url": link, "site": site,
                     "published": e.get("published", ""),
                     "summary": (e.get("summary", "") or "")[:SUMMARY_MAX]})
-    return out
+    return out, skipped
+
+
+def _skipped_note(n: int) -> str:
+    return (f"{n} item(s) skipped: link missing, not http(s), or an unresolved "
+            "Bing redirect") if n else ""
 
 
 # ── fetching ──────────────────────────────────────────────────────────
@@ -226,7 +252,8 @@ async def probe_topic(topic: str) -> dict:
     got = await feeds.read_feed(news_url(topic), limit=FETCH_PER_SOURCE)
     if not got.get("ok"):
         return {"ok": False, "note": f"{got.get('note', 'fetch failed')}. {UNREACHABLE_HINT}"}
-    return {"ok": True, "items": merge_duplicates(_items(got["entries"]), topic)}
+    items, skipped = _items(got["entries"])
+    return {"ok": True, "items": merge_duplicates(items, topic), "note": _skipped_note(skipped)}
 
 
 async def fetch_topic(rec: dict, per: int) -> dict:
@@ -236,12 +263,12 @@ async def fetch_topic(rec: dict, per: int) -> dict:
     if not got.get("ok"):
         row["note"] = f"{got.get('note', 'fetch failed')}. {UNREACHABLE_HINT}"
         return row
-    items = _items(got["entries"])
+    items, skipped = _items(got["entries"])
     kept = [it for it in items if not excluded(it["title"], rec["exclude"])]
     dropped = len(items) - len(kept)
     kept = merge_duplicates(kept, rec["topic"])[:per]
     row.update(ok=True, items=kept)
-    notes = []
+    notes = [_skipped_note(skipped)] if skipped else []
     if dropped:
         notes.append(f"{dropped} headline(s) dropped by exclude words")
     if not kept:
@@ -257,8 +284,12 @@ async def fetch_site(name: str, entry: dict, per: int) -> dict:
     if not got.get("ok"):
         row["note"] = got.get("note", "fetch failed")
         return row
-    kept = merge_duplicates(_items(got["entries"]))[:per]
-    row.update(ok=True, items=kept, note="" if kept else "the feed has no entries")
+    items, skipped = _items(got["entries"])
+    kept = merge_duplicates(items)[:per]
+    notes = [_skipped_note(skipped)] if skipped else []
+    if not kept:
+        notes.append("the feed has no usable entries")
+    row.update(ok=True, items=kept, note="; ".join(notes))
     return row
 
 
@@ -283,9 +314,11 @@ async def corner(per: int, only: str = "") -> dict:
         if only:
             msg = f"no hobby named '{only}'"
             return {"ok": False, "hobbies": [], "note": f"⚠ {warn}. {msg}" if warn else msg}
-        msg = ("no hobbies yet — hobby_add(topic) adds a keyword topic; "
-               "shelf_add(url, tags='hobby') adds a site")
-        return {"ok": True, "hobbies": [], "note": f"⚠ {warn}. {msg}" if warn else msg}
+        if warn:  # nothing to show *because* the saved lists are unreadable
+            return {"ok": False, "hobbies": [], "note": f"⚠ {warn}"}
+        return {"ok": True, "hobbies": [],
+                "note": ("no hobbies yet — hobby_add(topic) adds a keyword topic; "
+                         "shelf_add(url, tags='hobby') adds a site")}
 
     sem = asyncio.Semaphore(CORNER_CONCURRENCY)
 
@@ -294,9 +327,15 @@ async def corner(per: int, only: str = "") -> dict:
             return await factory()
 
     tasks = [asyncio.ensure_future(run(f)) for _, f in jobs]
-    done, pending = await asyncio.wait(tasks, timeout=CORNER_BUDGET_S)
-    for p in pending:
-        p.cancel()
+    try:
+        done, _pending = await asyncio.wait(tasks, timeout=CORNER_BUDGET_S)
+    finally:
+        # Budget overrun, or this call itself cancelled: stop the stragglers
+        # and let them unwind before returning.
+        for t in tasks:
+            if not t.done():
+                t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
     rows = []
     for (stub, _), task in zip(jobs, tasks):
         if task in done and not task.cancelled() and task.exception() is None:

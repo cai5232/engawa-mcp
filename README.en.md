@@ -124,7 +124,7 @@ Every record carries a `picked_by` field: who in your household asked for this s
 The user names a hobby — `hobby_add("sourdough")`, `hobby_add("大熊猫", exclude="债券")` — and from then on `hobby_corner()` shows its latest news alongside the porch's other daily things.
 
 - **Source.** Bing News' keyword RSS: free, no key, newest first. Its links are click-tracking redirects; engawa unwraps them to the publisher's own URL, which still goes through the guard when read.
-- **Same story, once.** Outlets repeat each other. Headlines are compared token by token (words for spaced scripts, character pairs for Chinese/Japanese/Korean, the topic's own tokens ignored); near-identical ones fold into the first, and `also_reported` says how many were folded.
+- **Same story, once.** Outlets repeat each other. Headlines are compared token by token (words for spaced scripts, character pairs for scripts written without spaces — Chinese, Japanese, Korean, Thai…; the topic's own tokens ignored); near-identical ones fold into the first, and `also_reported` says how many were folded.
 - **Exclude words.** Keyword matching is literal — "panda" also finds panda bonds. Exclude words drop those headlines locally (Bing's own `-word` syntax is not honored by its RSS).
 - **Sites too.** A site you already like goes on the shelf with `tags="hobby"` and joins the corner.
 - **Failure per row.** One unreachable source marks its own row with the reason; the rest still come back.

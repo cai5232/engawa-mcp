@@ -10,12 +10,19 @@ Names, not URLs, are the interface: `rss_read("aeon")` just works.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
 import re
 import uuid
 from pathlib import Path
+
+try:  # POSIX
+    import fcntl
+except ImportError:  # Windows
+    fcntl = None
+    import msvcrt
 from urllib.parse import urlparse
 
 import httpx
@@ -164,6 +171,66 @@ PICKED_BY_MAX = 24
 
 lock = asyncio.Lock()
 
+LOCK_WAIT_S = 5.0
+
+
+class WriteBlocked(Exception):
+    """A write transaction could not take its cross-process lock."""
+
+
+def _try_flock(fh) -> bool:
+    try:
+        if fcntl is not None:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        else:
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+        return True
+    except OSError:
+        return False
+
+
+def _unflock(fh) -> None:
+    try:
+        if fcntl is not None:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        else:
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+    except OSError:
+        pass
+
+
+@contextlib.asynccontextmanager
+async def transaction(stem: str, mem_lock: asyncio.Lock):
+    """Exclusive load → mutate → save. The asyncio lock serializes tool calls
+    inside this process; an advisory lock on CACHE_DIR/.<stem>.lock serializes
+    other engawa processes sharing the cache dir (Claude Desktop and Claude
+    Code each spawn their own stdio server). If the file lock is not free
+    within LOCK_WAIT_S, raises WriteBlocked instead of overwriting blind."""
+    async with mem_lock:
+        p = config.CACHE_DIR / f".{stem}.lock"
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            fh = open(p, "a+b")
+        except OSError as e:
+            raise WriteBlocked(f"couldn't open the lock file ({type(e).__name__}) — "
+                               "check ENGAWA_CACHE_DIR is writable") from e
+        try:
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + LOCK_WAIT_S
+            while not _try_flock(fh):
+                if loop.time() >= deadline:
+                    raise WriteBlocked(f"another engawa process is writing {stem}.json "
+                                       f"(lock held > {int(LOCK_WAIT_S)}s); try again")
+                await asyncio.sleep(0.05)
+            try:
+                yield
+            finally:
+                _unflock(fh)
+        finally:
+            fh.close()
+
 
 def _user_path() -> Path:
     return config.CACHE_DIR / "shelf.json"
@@ -220,9 +287,9 @@ def user_load() -> tuple[dict[str, dict], str]:
 
 
 def atomic_write_json(p: Path, data) -> None:
-    """Atomic within one process (unique temp file + rename). Two server
-    processes sharing one ENGAWA_CACHE_DIR can still lose one of two
-    concurrent updates — run one instance per cache dir."""
+    """Atomic replace (unique temp file + rename): readers never see a half
+    file. Call it inside transaction() so concurrent writers — in this
+    process or another — cannot lose each other's updates."""
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.parent / f".{p.stem}-{os.getpid()}-{uuid.uuid4().hex[:8]}.tmp"
     try:
